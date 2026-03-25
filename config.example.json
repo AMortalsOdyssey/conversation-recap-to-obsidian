@@ -1,0 +1,6 @@
+{
+  "vault": "YOUR_VAULT_NAME",
+  "daily_dir": "daily",
+  "weekly_dir": "weekly",
+  "obsidian_bin": "/Applications/Obsidian.app/Contents/MacOS/Obsidian"
+}
