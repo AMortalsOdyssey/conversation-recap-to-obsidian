@@ -106,11 +106,13 @@ def monday_for(date: dt.date) -> dt.date:
 
 
 def daily_path(config: Dict[str, Any], date: dt.date) -> str:
-    return f"{config['daily_dir'].rstrip('/')}/{date.isoformat()}.md"
+    base = config['daily_dir'].rstrip('/')
+    return f"{base}/{date.year}/{date.month:02d}/{date.isoformat()}.md"
 
 
 def weekly_path(config: Dict[str, Any], sunday: dt.date) -> str:
-    return f"{config['weekly_dir'].rstrip('/')}/{sunday.isoformat()}.md"
+    base = config['weekly_dir'].rstrip('/')
+    return f"{base}/{sunday.year}/{sunday.month:02d}/{sunday.isoformat()}.md"
 
 
 def extract_wikilinks(text: str) -> List[str]:

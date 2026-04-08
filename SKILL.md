@@ -49,8 +49,8 @@ Use scripts when they improve reliability. Do not avoid them just to stay “pur
 ## Daily note target
 
 Default path:
-- `daily/YYYY-MM-DD.md`
-- Users may override this through local config
+- `daily/YYYY/MM/YYYY-MM-DD.md` (organized by year and month)
+- Users may override the base directory through local config
 
 ## Mode 1: Session recap mode
 
@@ -122,7 +122,7 @@ When asked to refresh the daily summary:
 ## Mode 3: Weekly summary mode
 
 Default path:
-- `weekly/YYYY-MM-DD.md`
+- `weekly/YYYY/MM/YYYY-MM-DD.md` (organized by year and month)
 
 The date is the **Sunday** of that reporting week.
 
