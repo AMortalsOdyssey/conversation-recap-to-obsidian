@@ -1,6 +1,6 @@
 ---
 name: conversation-recap-to-obsidian
-description: Build high-value Obsidian daily and weekly review notes from conversation or existing markdown notes. Use this skill whenever the user asks to summarize the current chat into Obsidian, append a structured session recap, regenerate a daily summary from a full daily note, create or refresh a weekly report, merge same-topic work across multiple days, group work by project/task instead of by date, or extract structured review notes with conclusions, key points, tags, and wikilinks.
+description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, or key points.
 ---
 
 # Conversation Recap to Obsidian
@@ -65,11 +65,10 @@ Create a new item in the daily note as source material for later summaries.
 ```markdown
 #### 事项标题 — HH:mm
 
-- **问题**: ...
-- **方案**: ...
-- **结论**: ...
-- **关键点**: ...
-- **关联**: [[...]] · [[...]]
+- **结果**: ...
+- **处理**: ...
+- **要点**: ...
+- **文档**: [[...]] · [[...]]
 - **标签**: #tag-a #tag-b
 ```
 
@@ -77,9 +76,14 @@ Create a new item in the daily note as source material for later summaries.
 
 - Prefer one concrete work item per entry.
 - If the conversation truly covered multiple unrelated things, either split into 2 entries or name the entry at a higher level.
-- Keep each field tight and useful.
+- Keep each field tight and useful; the raw entry should still be reviewable without becoming a transcript.
 - The title should describe the work item, not just say “对话总结”.
 - Use tags sparingly; 1-3 strong tags are enough.
+- `结果` is the final outcome or durable state.
+- `处理` is the shortest useful description of what changed or how it was handled.
+- `要点` is for 1-2 reusable decisions, constraints, or lessons. Do not paste test logs or every implementation detail.
+- Keep process evidence such as tests, commits, pushes, and dirty-tree handling out of `要点` unless it is the actual lesson.
+- `文档` should include only the strongest durable links, normally 1-3.
 - Preserve document hierarchy: session entries belong in the raw entry section of the daily note, and the generated `## 今日总结` block should stay as a higher-level summary section near the end of the note.
 - When appending an entry to a daily note that already contains `## 今日总结`, insert the new entry **before** the generated summary block, then refresh the summary if needed.
 
@@ -100,11 +104,14 @@ When asked to refresh the daily summary:
 ```markdown
 ## 今日总结
 
-- 今日主要事项：...
-- 核心解决的问题：...
-- 关键点：...
-- 结论/产出：...
-- 相关文档：[[...]] · [[...]]
+### 今日重点
+1. **事项名**：结果或产出
+
+### 关键判断
+- ...
+
+### 文档与标签
+- 文档：[[...]] · [[...]]
 - 标签：#tag-a #tag-b
 ```
 
@@ -113,11 +120,15 @@ When asked to refresh the daily summary:
 - Prefer outcomes over chronology.
 - Merge duplicate points.
 - If multiple sessions worked on the same thing, describe it once more strongly.
-- If there are multiple unrelated threads, mention the top 2-3, not every small action.
+- Keep all major same-day work visible, but compress each item to the smallest useful unit.
+- The default item shape is one line: `事项名：结果或产出`.
+- Put detailed problem / solution / evidence in the raw session entry, not in the daily summary.
+- Use `关键判断` only for reusable decisions, constraints, or lessons; do not copy every key point from every entry, and skip process evidence such as tests, commits, pushes, and dirty-tree handling.
 - Keep links limited to durable notes or outputs.
 - Treat the entire note as evidence; do not downgrade a section just because it was written by another AI/tool.
 - Ignore only the current skill's previous generated summary block when refreshing, so the summary does not recursively paraphrase itself.
 - Keep the summary compact and high-density rather than long and chatty.
+- Avoid semicolon-heavy mega-lines. Prefer short numbered modules and short bullets.
 
 ## Mode 3: Weekly summary mode
 
@@ -233,7 +244,7 @@ python scripts/recap_manager.py append-entry \
   --problem "登录后 401，被踢回" \
   --solution "补 JWKS 公钥验签并修正 issuer" \
   --conclusion "测试和正式环境恢复正常" \
-  --key-points "先确认 token claims，再加严格校验" \
+  --key-points "先确认 session claims，再加严格校验" \
   --links "app/core/auth/jwt_auth.py,deploy/config.k8s.yaml" \
   --tags "jwt,auth,线上排障"
 ```

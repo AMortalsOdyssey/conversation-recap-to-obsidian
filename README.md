@@ -38,7 +38,10 @@ This skill is useful if you:
 - **Handwritten content stays safe**: the skill only replaces the generated summary block and does not overwrite the rest of the note
 - **Weekly reports are grouped by topic**: if one task spans three days, it appears as one merged weekly module rather than three separate day-based notes
 - **Three-layer structure**: raw entries → daily summary → weekly report
+- **Session entries stay compact**: raw entries use `结果` / `处理` / `要点` / `文档` / `标签` instead of verbose problem-solution transcripts
+- **Daily summaries are scannable**: the generated block uses `今日重点` / `关键判断` / `文档与标签` instead of long semicolon-heavy lines
 - **Tags and document links are supported**: useful for later search, filtering, and review
+- **Frontmatter is maintained automatically**: daily/weekly notes keep `date`/`type`/`word_count` and derived `tags`; `word_count` is the body character count after frontmatter
 
 ## Advantages
 
@@ -57,7 +60,8 @@ conversation-recap-to-obsidian/
 ├── config.example.json
 ├── .gitignore
 └── scripts/
-    └── recap_manager.py
+    ├── recap_manager.py
+    └── test_recap_manager.py
 ```
 
 ## Configuration
@@ -67,9 +71,10 @@ Copy `config.example.json` to `config.json` and edit it for your own environment
 ```json
 {
   "vault": "YOUR_VAULT_NAME",
+  "vault_path": "/absolute/path/to/your/vault",
   "daily_dir": "daily",
   "weekly_dir": "weekly",
-  "obsidian_bin": "/path/to/your/Obsidian/CLI"
+  "obsidian_bin": "obsidian"
 }
 ```
 
@@ -78,6 +83,8 @@ Configuration precedence:
 2. `config.json`
 3. built-in defaults
 
+`obsidian_bin` defaults to `obsidian`, which is the preferred write path. `vault_path` is optional and used as a fallback when the CLI is unavailable or returns an unexpected error.
+
 ## CLI usage
 
 ### 1) Append one session entry
@@ -85,10 +92,10 @@ Configuration precedence:
 ```bash
 python scripts/recap_manager.py append-entry \
   --title "JWT verification fix and production debugging" \
-  --problem "Users were redirected after login because the token validation path was wrong" \
+  --problem "Users were redirected after login because the session validation path was wrong" \
   --solution "Add JWKS-based verification and fix the issuer configuration" \
   --conclusion "Both staging and production are working again" \
-  --key-points "Confirm token claims before adding strict validation" \
+  --key-points "Confirm session claims before adding strict validation" \
   --links "app/core/auth/jwt_auth.py,deploy/config.k8s.yaml" \
   --tags "jwt,auth,production-debugging"
 ```
