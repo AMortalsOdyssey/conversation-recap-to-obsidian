@@ -7,6 +7,9 @@ A publishable skill for turning conversations or existing Obsidian notes into hi
 - Turns a single conversation into a structured entry inside today’s daily note
 - Reads all entries from the current day and generates a **daily summary**
 - Reads a full week of daily notes and generates a **weekly report** grouped by work item instead of by date
+- Verifies saved notes by checking generated-section markers and `word_count`
+- Prints a concise group-sendable weekly version from the saved weekly note
+- Creates optional Obsidian Bases indexes for daily notes and weekly reports
 - Treats the whole note as usable source material, regardless of whether parts were written by a human, Claude Code, OpenClaw, or another AI/tool
 - Rewrites only the generated summary block and leaves the rest of the note untouched
 
@@ -24,6 +27,7 @@ This skill is useful if you:
 | `/summary` or `summary` | Summarize the current conversation and append one `####` entry to today’s daily note |
 | `/summary daily` or `daily` | Read all entries from today and regenerate the daily summary at the end of the file |
 | `/summary weekly` or `weekly` | Read one week of daily notes and generate a standalone weekly report grouped by work item |
+| `weekly brief` | Print a short weekly version suitable for sending to a group chat |
 
 ## A typical day
 
@@ -40,6 +44,9 @@ This skill is useful if you:
 - **Three-layer structure**: raw entries → daily summary → weekly report
 - **Session entries stay compact**: raw entries use `结果` / `处理` / `要点` / `文档` / `标签` instead of verbose problem-solution transcripts
 - **Daily summaries are scannable**: the generated block uses `今日重点` / `关键判断` / `文档与标签` instead of long semicolon-heavy lines
+- **Saved notes are verifiable**: the helper can reread a saved note, check `word_count`, and fix it when needed
+- **Weekly reports can produce a shareable brief**: the helper reads the saved weekly report and prints a compact version
+- **Optional Obsidian Bases indexes**: generate `.base` files for browsing daily and weekly notes inside Obsidian
 - **Tags and document links are supported**: useful for later search, filtering, and review
 - **Frontmatter is maintained automatically**: daily/weekly notes keep `date`/`type`/`word_count` and derived `tags`; `word_count` is the body character count after frontmatter
 
@@ -74,6 +81,7 @@ Copy `config.example.json` to `config.json` and edit it for your own environment
   "vault_path": "/absolute/path/to/your/vault",
   "daily_dir": "daily",
   "weekly_dir": "weekly",
+  "index_dir": "index",
   "obsidian_bin": "obsidian"
 }
 ```
@@ -118,6 +126,29 @@ python scripts/recap_manager.py generate-weekly-auto --mode current
 python scripts/recap_manager.py generate-weekly-auto --mode last-week
 ```
 
+### 5) Verify a saved note
+
+```bash
+python scripts/recap_manager.py verify-note \
+  --path "weekly/2026/06/2026-06-21.md" \
+  --fix
+```
+
+### 6) Print a group-sendable weekly brief
+
+```bash
+python scripts/recap_manager.py print-weekly-brief \
+  --path "weekly/2026/06/2026-06-21.md"
+```
+
+### 7) Create Obsidian Bases indexes
+
+```bash
+python scripts/recap_manager.py ensure-index-base --kind all
+```
+
+This writes `Daily Notes.base` and `Weekly Reports.base` under `index_dir`.
+
 ## Publishing guidance
 
 If you want to publish this skill to GitHub or ClawHub, commit:
@@ -126,9 +157,12 @@ If you want to publish this skill to GitHub or ClawHub, commit:
 - `config.example.json`
 - `.gitignore`
 - `scripts/recap_manager.py`
+- `scripts/test_recap_manager.py`
 
 Do **not** commit:
 - `config.json`
+- `__pycache__/`
+- `.DS_Store`
 
 ## Environment notes
 

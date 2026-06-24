@@ -18,6 +18,7 @@ DEFAULTS = {
     "vault_path": "",
     "daily_dir": "Memory/daily",
     "weekly_dir": "Memory/weekly",
+    "index_dir": "Memory/index",
 }
 START = "<!-- AI_SUMMARY_START -->"
 END = "<!-- AI_SUMMARY_END -->"
@@ -38,7 +39,7 @@ def load_config(cli_args: argparse.Namespace) -> Dict[str, Any]:
                 config.update({k: v for k, v in file_cfg.items() if v not in (None, '')})
         except Exception:
             pass
-    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir'):
+    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir', 'index_dir'):
         val = getattr(cli_args, key, None)
         if val:
             config[key] = val
@@ -329,12 +330,21 @@ def weekly_path(config: Dict[str, Any], sunday: dt.date) -> str:
     return f"{base}/{sunday.year}/{sunday.month:02d}/{sunday.isoformat()}.md"
 
 
+def base_index_path(config: Dict[str, Any], kind: str) -> str:
+    base = config['index_dir'].rstrip('/')
+    if kind == 'daily':
+        return f"{base}/Daily Notes.base"
+    if kind == 'weekly':
+        return f"{base}/Weekly Reports.base"
+    raise ValueError(f"unknown base kind: {kind}")
+
+
 def extract_wikilinks(text: str) -> List[str]:
     return sorted(set(re.findall(r'\[\[([^\]]+)\]\]', text)))
 
 
 def parse_tags_text(text: str) -> List[str]:
-    tags = re.findall(r'#([A-Za-z0-9_\-\u4e00-\u9fff]+)', text)
+    tags = re.findall(r'#([A-Za-z0-9_/\-\u4e00-\u9fff]+)', text)
     return uniq_keep_order(tags)
 
 
@@ -563,11 +573,17 @@ def build_daily_summary_from_note(note_text: str) -> str:
 
 def normalize_bucket(title: str) -> str:
     t = title.lower()
+    if 'team sharing' in t or 'team-sharing' in t:
+        return 'Team Sharing'
+    if 'share pages' in t or 'share-pages' in t:
+        return 'Share Pages'
+    if 'knowledge space' in t:
+        return 'Knowledge Space'
     if 'summary' in t or '日报' in t or '周报' in t or '复盘' in t:
         return '总结与复盘能力'
     if '导入' in title or '迁移' in title or '数据库' in title:
         return '导入链路与数据库修复'
-    if 'obsidian' in t or 'skill' in t:
+    if 'obsidian' in t and 'skill' in t:
         return 'Obsidian 与 Skill 工作流'
     return title
 
@@ -657,6 +673,122 @@ def build_weekly_report(week_start: dt.date, week_end: dt.date, items: Dict[str,
     return render_note(meta, body)
 
 
+def iter_weekly_modules(note_text: str) -> List[Dict[str, str]]:
+    body = strip_frontmatter(note_text)
+    region = find_generated_region(body)
+    if region:
+        start_idx, end_idx = region
+        body = body[start_idx + len(START):end_idx - len(END)]
+    modules: List[Dict[str, str]] = []
+    current: Dict[str, str] | None = None
+    for line in body.splitlines():
+        heading = re.match(r'^###\s+(?:\d+\.\s*)?(.+?)\s*$', line.strip())
+        if heading:
+            if current:
+                modules.append(current)
+            current = {'title': heading.group(1).strip(), 'body': ''}
+            continue
+        if current is not None:
+            current['body'] += line + '\n'
+    if current:
+        modules.append(current)
+    return modules
+
+
+def parse_weekly_module_fields(body: str) -> Dict[str, str]:
+    labels = {
+        '涉及日期': 'dates',
+        '核心解决的问题': 'problem',
+        '关键点': 'key_points',
+        '结论/产出': 'conclusion',
+        '相关文档': 'links',
+        '标签': 'tags',
+    }
+    out = {v: '' for v in labels.values()}
+    for line in body.splitlines():
+        m = re.match(r'^-\s+(.+?)：\s*(.*)$', line.strip())
+        if m and m.group(1) in labels:
+            out[labels[m.group(1)]] = m.group(2).strip()
+    return out
+
+
+def build_weekly_brief_from_note(note_text: str, limit: int = 7) -> str:
+    modules = iter_weekly_modules(note_text)
+    lines = ['上周']
+    if not modules:
+        return '上周\n1. 工作复盘：暂无可提炼的结构化周报内容。'
+
+    for idx, module in enumerate(modules[:limit], 1):
+        fields = parse_weekly_module_fields(module['body'])
+        sentence = fields['conclusion'] or fields['problem'] or fields['key_points'] or '完成了相关事项整理与沉淀。'
+        sentence = shorten_text(sentence, 72)
+        lines.append(f'{idx}. {module["title"]}：{sentence}。')
+    return '\n'.join(lines)
+
+
+def build_base_index_content(kind: str) -> str:
+    if kind == 'daily':
+        return """filters:
+  and:
+    - 'type == "daily"'
+    - 'file.ext == "md"'
+
+properties:
+  date:
+    displayName: Date
+  word_count:
+    displayName: "Body Characters"
+  tags:
+    displayName: Tags
+
+views:
+  - type: table
+    name: "Recent Daily Notes"
+    limit: 60
+    order:
+      - file.name
+      - date
+      - word_count
+      - tags
+      - file.mtime
+    groupBy:
+      property: date
+      direction: DESC
+"""
+    if kind == 'weekly':
+        return """filters:
+  and:
+    - 'type == "weekly-summary"'
+    - 'file.ext == "md"'
+
+properties:
+  week_start:
+    displayName: "Week Start"
+  week_end:
+    displayName: "Week End"
+  word_count:
+    displayName: "Body Characters"
+  tags:
+    displayName: Tags
+
+views:
+  - type: table
+    name: "Weekly Reports"
+    limit: 52
+    order:
+      - file.name
+      - week_start
+      - week_end
+      - word_count
+      - tags
+      - file.mtime
+    groupBy:
+      property: week_end
+      direction: DESC
+"""
+    raise ValueError(f"unknown base kind: {kind}")
+
+
 def build_entry_block(args) -> str:
     now = args.time or dt.datetime.now().strftime('%H:%M')
     title = clean_title(args.title)
@@ -717,6 +849,57 @@ def cmd_generate_weekly_auto(args):
     print(path)
 
 
+def cmd_print_weekly_brief(args):
+    config = load_config(args)
+    if args.path:
+        path = args.path
+    else:
+        anchor = dt.date.today() - dt.timedelta(days=7) if args.mode == 'last-week' else (parse_date(args.date) if args.date else dt.date.today())
+        path = weekly_path(config, sunday_for(anchor))
+    note = read_note(config, path)
+    print(build_weekly_brief_from_note(note, limit=args.limit))
+
+
+def cmd_verify_note(args):
+    config = load_config(args)
+    text = read_note(config, args.path)
+    meta, body = split_frontmatter(text)
+    actual = count_body_chars(body)
+    stored_raw = meta.get('word_count')
+    try:
+        stored = int(stored_raw)
+    except Exception:
+        stored = None
+    marker_ok = text.count(START) == text.count(END)
+    fixed = False
+    if args.fix and (stored != actual or not stored_raw):
+        meta['word_count'] = actual
+        create_or_overwrite_note(config, args.path, render_note(meta, body))
+        stored = actual
+        fixed = True
+    result = {
+        'path': args.path,
+        'word_count': stored,
+        'actual_word_count': actual,
+        'word_count_ok': stored == actual,
+        'summary_markers_ok': marker_ok,
+        'fixed': fixed,
+    }
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_ensure_index_base(args):
+    config = load_config(args)
+    kinds = ['daily', 'weekly'] if args.kind == 'all' else [args.kind]
+    written = []
+    for kind in kinds:
+        path = base_index_path(config, kind)
+        content = build_base_index_content(kind)
+        create_or_overwrite_note(config, path, content)
+        written.append(path)
+    print('\n'.join(written))
+
+
 def add_common_args(p):
     p.add_argument('--config')
     p.add_argument('--obsidian-bin')
@@ -724,6 +907,7 @@ def add_common_args(p):
     p.add_argument('--vault-path')
     p.add_argument('--daily-dir')
     p.add_argument('--weekly-dir')
+    p.add_argument('--index-dir')
 
 
 def main():
@@ -753,6 +937,25 @@ def main():
     w.add_argument('--mode', choices=['current', 'last-week'], default='current')
     w.add_argument('--date')
     w.set_defaults(func=cmd_generate_weekly_auto)
+
+    b = sub.add_parser('print-weekly-brief', help='Read a weekly report and print a concise group-sendable version.')
+    add_common_args(b)
+    b.add_argument('--mode', choices=['current', 'last-week'], default='current')
+    b.add_argument('--date')
+    b.add_argument('--path')
+    b.add_argument('--limit', type=int, default=7)
+    b.set_defaults(func=cmd_print_weekly_brief)
+
+    v = sub.add_parser('verify-note', help='Verify a note word_count and generated summary markers.')
+    add_common_args(v)
+    v.add_argument('--path', required=True)
+    v.add_argument('--fix', action='store_true')
+    v.set_defaults(func=cmd_verify_note)
+
+    ib = sub.add_parser('ensure-index-base', help='Create or refresh Obsidian Bases index files for daily and weekly notes.')
+    add_common_args(ib)
+    ib.add_argument('--kind', choices=['daily', 'weekly', 'all'], default='all')
+    ib.set_defaults(func=cmd_ensure_index_base)
 
     args = ap.parse_args()
     args.func(args)

@@ -1,6 +1,6 @@
 ---
 name: conversation-recap-to-obsidian
-description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, or key points.
+description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, key points, Obsidian Bases indexes, or group-sendable weekly report versions. Also use when the user says “总结会话”, “总结上周周报”, asks to refresh Daily Note/weekly notes, or asks to make the recap/weekly workflow stronger.
 ---
 
 # Conversation Recap to Obsidian
@@ -20,6 +20,7 @@ The default goal is to help the user answer:
 - appending a single session entry into a daily note
 - regenerating a daily summary by reading the full daily note first
 - creating a weekly report from multiple daily notes
+- creating a weekly report in Obsidian and then outputting a concise group-sendable summary
 - merging a multi-day thread into one weekly module
 - replacing stale generated summary blocks while preserving all non-target content
 - producing Obsidian wikilinks for relevant artifacts
@@ -44,7 +45,22 @@ Split the work in three layers:
    - rank larger / more complex items first
    - avoid day-by-day流水账
 
+4. **Verification and review layer = durable Obsidian writeback**
+   - reread saved notes after writing
+   - verify `word_count` against the actual body character count
+   - keep generated summary markers balanced
+   - optionally create `.base` index files for browsing daily and weekly notes inside Obsidian
+
 Use scripts when they improve reliability. Do not avoid them just to stay “pure prompt only.”
+
+## Obsidian companion skills
+
+When this skill writes Obsidian content, apply these installed skill conventions as needed:
+
+- `obsidian-markdown`: use valid properties/frontmatter, wikilinks, tags, embeds, and callouts. Use wikilinks only for durable vault-local notes or artifacts.
+- `obsidian-cli`: prefer the configured vault and exact `path=` when paths are known; after writes, reread the target file instead of trusting command output.
+- `obsidian-bases`: use `.base` files for index/review surfaces, not for replacing prose recaps. Keep Bases valid YAML and test with a parser when possible.
+- `json-canvas`: use only when the user asks for a visual map, relationship board, or project canvas; do not add canvas files to ordinary recap flows by default.
 
 ## Daily note target
 
@@ -191,6 +207,37 @@ Larger, longer-running, more complex items should appear earlier.
 - When source material is sparse or uneven, still try to infer the strongest few work modules from headings, bullets, and existing summary sections.
 - Keep each module concise; the default should read like a crisp weekly review, not a transcript.
 
+### Weekly command behavior
+
+When the user says “总结上周周报” or equivalent:
+1. Generate or refresh the previous week’s Obsidian weekly note first, normally with `scripts/recap_manager.py generate-weekly-auto --mode last-week`.
+2. Read back the generated weekly note and verify it was written.
+3. If the user says a current-day daily note contains补记上周工作, or the relevant daily note explicitly marks content as belonging to last week, incorporate that material into the previous week’s weekly note before finalizing.
+4. Keep the weekly note organized by work item, not by day. If the script produces too many small modules, merge them into 2-6 stronger modules by theme and update `word_count`.
+5. Run `scripts/recap_manager.py verify-note --path <weekly-note-path> --fix` after edits, then reread the note if `fixed` is true.
+6. Produce a separate group-sendable version with `scripts/recap_manager.py print-weekly-brief --path <weekly-note-path>` and include it in the final response.
+
+### Group-sendable weekly version
+
+Produce this version after weekly note verification when requested directly, or when the user says “总结上周周报”.
+
+Default shape:
+
+```text
+上周
+1. 关键词：一句话总结。
+2. 关键词：一句话总结。
+```
+
+Writing guidance:
+- Use 4-7 numbered items unless the weekly note is clearly smaller or larger.
+- Each item must be one sentence.
+- Put a descriptive keyword before `：`; prefer “领域 + 目标” or “能力 + 结果”, such as `Team Sharing 控制面`、`分享权限治理`、`Knowledge Space 共识库`, not overly short labels like `安装` or `治理`.
+- Make the keyword specific enough that a group reader can identify the work area without reading the sentence.
+- Emphasize outcomes and product capability changes, not commands, tests, commits, or implementation logs.
+- Preserve the weekly note’s ranking and merge small adjacent items where the group version would otherwise feel repetitive.
+- In the final reply, include the group-sendable block and briefly mention the Obsidian weekly note path.
+
 ## Tagging guidance
 
 Tags are optional but useful.
@@ -260,6 +307,33 @@ Generate a weekly report:
 ```bash
 python scripts/recap_manager.py generate-weekly-auto --mode last-week
 ```
+
+Verify a saved note and fix `word_count` if needed:
+
+```bash
+python scripts/recap_manager.py verify-note \
+  --path "Memory/weekly/2026/06/2026-06-21.md" \
+  --fix
+```
+
+Print a concise group-sendable weekly version from the saved weekly note:
+
+```bash
+python scripts/recap_manager.py print-weekly-brief \
+  --path "Memory/weekly/2026/06/2026-06-21.md"
+```
+
+Create or refresh Obsidian Bases indexes for review:
+
+```bash
+python scripts/recap_manager.py ensure-index-base --kind all
+```
+
+This creates `.base` files under `Memory/index/` by default:
+- `Daily Notes.base`
+- `Weekly Reports.base`
+
+Use these indexes as browsing/review surfaces inside Obsidian. Do not treat them as the source of truth; Daily Notes and weekly notes remain the source material.
 
 ## Important constraints
 

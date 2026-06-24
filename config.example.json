@@ -3,5 +3,6 @@
   "vault_path": "/absolute/path/to/your/vault",
   "daily_dir": "daily",
   "weekly_dir": "weekly",
+  "index_dir": "index",
   "obsidian_bin": "obsidian"
 }
