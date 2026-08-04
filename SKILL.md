@@ -1,6 +1,6 @@
 ---
 name: conversation-recap-to-obsidian
-description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, key points, Obsidian Bases indexes, or group-sendable weekly report versions. Also use when the user says “总结会话”, “总结上周周报”, asks to refresh Daily Note/weekly notes, or asks to make the recap/weekly workflow stronger.
+description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, key points, Obsidian Bases indexes, or concise project-grouped weekly briefs for sharing in a team chat. Also use when the user says “总结会话”, “总结上周周报”, “可发群版本”, asks to refresh Daily Note/weekly notes, or asks to improve the recap/weekly workflow.
 ---
 
 # Conversation Recap to Obsidian
@@ -230,18 +230,27 @@ Produce this version after weekly note verification when requested directly, or 
 Default shape:
 
 ```text
-上周
-1. 关键词：一句话总结。
-2. 关键词：一句话总结。
+上周工作：
+
+1. 项目 A 问题修复与优化
+   - 问题修复：修复问题 1、问题 2 和问题 3。
+   - 体验与性能优化：完成优化 1 和优化 2。
+   - 测试验证：完成测试环境部署和真实终端验收。
+2. 项目 B
+   - 能力发布：完成能力调整并发布新版本。
 ```
 
 Writing guidance:
-- Use 4-7 numbered items unless the weekly note is clearly smaller or larger.
-- Each item must be one sentence.
-- Put a descriptive keyword before `：`; prefer “领域 + 目标” or “能力 + 结果”, such as `Team Sharing 控制面`、`分享权限治理`、`Knowledge Space 共识库`, not overly short labels like `安装` or `治理`.
-- Make the keyword specific enough that a group reader can identify the work area without reading the sentence.
+- Use the project, product, or major workstream as the top-level unit. Do not turn several technical modules from the same project into separate numbered items.
+- Prefer 2-4 top-level items. Under each item, merge related work into 1-3 short category bullets such as `问题修复`、`体验与性能优化`、`测试验证`、`能力发布`; omit categories with no meaningful content.
+- Put concrete outcomes after each category. Combine closely related fixes into a short enumeration instead of narrating each implementation step.
+- Keep a single small workstream on one line when subcategories would add ceremony.
 - Emphasize outcomes and product capability changes, not commands, tests, commits, or implementation logs.
-- Preserve the weekly note’s ranking and merge small adjacent items where the group version would otherwise feel repetitive.
+- Preserve the weekly note’s ranking, but optimize for quick scanning in a group chat. A reader should understand the week from project names and category labels alone.
+- Treat `print-weekly-brief` output as a structured draft. If it still exposes module-level repetition, rewrite it into project-level groups before returning it.
+- Avoid this verbose shape: four consecutive numbered items all starting with the same project name.
+- Grouping fires automatically on a repeated leading latin token (`Kizuna`, `MagClaw`) and on a shared CJK prefix of two or more characters (`创角`, `记忆`). It cannot tell that two differently-named modules belong to the same project, so merge those by hand.
+- The command reports overflow as `另有 N 项…` instead of dropping it. Replace those lines with the real items or keep them, but never just delete them — a brief sent to a group chat must not quietly lose a workstream.
 - In the final reply, include the group-sendable block and briefly mention the Obsidian weekly note path.
 
 ## Tagging guidance

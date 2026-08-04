@@ -734,17 +734,100 @@ def parse_weekly_module_fields(body: str) -> Dict[str, str]:
     return out
 
 
-def build_weekly_brief_from_note(note_text: str, limit: int = 7) -> str:
-    modules = iter_weekly_modules(note_text)
-    lines = ['上周']
-    if not modules:
-        return '上周\n1. 工作复盘：暂无可提炼的结构化周报内容。'
+MIN_CJK_BRIEF_PREFIX = 2
+# Subitems listed under one project group in the group-sendable brief. Anything past
+# this is reported as a count rather than dropped.
+MAX_BRIEF_SUBITEMS = 4
 
-    for idx, module in enumerate(modules[:limit], 1):
-        fields = parse_weekly_module_fields(module['body'])
-        sentence = fields['conclusion'] or fields['problem'] or fields['key_points'] or '完成了相关事项整理与沉淀。'
-        sentence = shorten_text(sentence, 72)
-        lines.append(f'{idx}. {module["title"]}：{sentence}。')
+
+def weekly_brief_prefix(title: str) -> str:
+    """Return the project token a module title starts with, or '' if there is none.
+
+    Only a leading latin token counts here (Kizuna, MagClaw). CJK project names have
+    no whitespace to split on, so they are handled by
+    weekly_brief_shared_cjk_prefixes across the whole module set instead.
+    """
+    parts = title.split(maxsplit=1)
+    if not parts:
+        return ''
+    first = parts[0].strip('：:、/|-')
+    if re.fullmatch(r'[A-Za-z][A-Za-z0-9._-]{1,31}', first):
+        return first
+    return ''
+
+
+def weekly_brief_shared_cjk_prefixes(titles: List[str]) -> List[str]:
+    """Find CJK project prefixes shared by at least two module titles.
+
+    Without this the grouping only fires on latin project names, so a week of
+    「创角问题修复」「创角性能优化」「创角测试验证」 would still print three top-level
+    items all starting with the same words — exactly the repetition the group-sendable
+    brief exists to avoid. Requires at least MIN_CJK_BRIEF_PREFIX characters and a
+    non-empty remainder for every member, so a one-character coincidence cannot merge
+    unrelated work. Longer prefixes win, keeping 「创角立绘」 tighter than 「创角」 when
+    both apply.
+    """
+    candidates: Dict[str, int] = {}
+    for i, left in enumerate(titles):
+        for right in titles[i + 1:]:
+            shared = 0
+            for a, b in zip(left, right):
+                if a != b:
+                    break
+                shared += 1
+            prefix = left[:shared].strip()
+            if len(prefix) < MIN_CJK_BRIEF_PREFIX or not re.fullmatch(r'[一-鿿]+', prefix):
+                continue
+            if left[len(prefix):].strip(' ：:、/|-') and right[len(prefix):].strip(' ：:、/|-'):
+                candidates[prefix] = candidates.get(prefix, 0) + 1
+    return sorted(candidates, key=len, reverse=True)
+
+
+def weekly_brief_sentence(module: Dict[str, str]) -> str:
+    fields = parse_weekly_module_fields(module['body'])
+    sentence = fields['conclusion'] or fields['problem'] or fields['key_points'] or '完成了相关事项整理与沉淀。'
+    return shorten_text(sentence, 72).rstrip('。；; ')
+
+
+def build_weekly_brief_from_note(note_text: str, limit: int = 4) -> str:
+    modules = iter_weekly_modules(note_text)
+    lines = ['上周工作：']
+    if not modules:
+        return '上周工作：\n1. 工作复盘：暂无可提炼的结构化周报内容。'
+
+    titles = [module['title'] for module in modules]
+    prefixes = [weekly_brief_prefix(title) for title in titles]
+    repeated_prefixes = {prefix for prefix in prefixes if prefix and prefixes.count(prefix) > 1}
+    cjk_prefixes = weekly_brief_shared_cjk_prefixes(titles)
+
+    def group_key(title: str, latin_prefix: str) -> str:
+        if latin_prefix in repeated_prefixes:
+            return latin_prefix
+        for prefix in cjk_prefixes:
+            if title.startswith(prefix) and title[len(prefix):].strip(' ：:、/|-'):
+                return prefix
+        return title
+
+    groups: Dict[str, List[Dict[str, str]]] = {}
+    for module, title, prefix in zip(modules, titles, prefixes):
+        groups.setdefault(group_key(title, prefix), []).append(module)
+
+    ordered = list(groups.items())
+    for idx, (group_title, group_modules) in enumerate(ordered[:limit], 1):
+        if len(group_modules) == 1:
+            lines.append(f'{idx}. {group_title}：{weekly_brief_sentence(group_modules[0])}。')
+            continue
+
+        lines.append(f'{idx}. {group_title}')
+        for module in group_modules[:MAX_BRIEF_SUBITEMS]:
+            subtitle = module['title'][len(group_title):].strip(' ：:、/|-') or '主要进展'
+            lines.append(f'   - {subtitle}：{weekly_brief_sentence(module)}。')
+        # Never let work vanish from a brief that gets sent to a group chat.
+        dropped = len(group_modules) - MAX_BRIEF_SUBITEMS
+        if dropped > 0:
+            lines.append(f'   - 另有 {dropped} 项同项目工作，详见周报。')
+    if len(ordered) > limit:
+        lines.append(f'（另有 {len(ordered) - limit} 项工作未列入，详见周报。）')
     return '\n'.join(lines)
 
 
@@ -983,7 +1066,7 @@ def main():
     b.add_argument('--mode', choices=['current', 'last-week'], default='current')
     b.add_argument('--date')
     b.add_argument('--path')
-    b.add_argument('--limit', type=int, default=7)
+    b.add_argument('--limit', type=int, default=4, help='Maximum number of top-level project groups to print.')
     b.set_defaults(func=cmd_print_weekly_brief)
 
     v = sub.add_parser('verify-note', help='Verify a note word_count and generated summary markers.')

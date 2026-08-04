@@ -209,9 +209,74 @@ word_count: 1
 
         brief = recap_manager.build_weekly_brief_from_note(note)
 
-        self.assertIn("上周", brief)
+        self.assertIn("上周工作：", brief)
         self.assertIn("1. Team Sharing：完成异步上报边界梳理", brief)
         self.assertIn("2. Obsidian 与 Skill 工作流：新增周报索引思路", brief)
+
+    def test_weekly_brief_groups_repeated_project_prefixes(self):
+        note = """<!-- AI_SUMMARY_START -->
+### 1. Kizuna 创角问题修复
+- 结论/产出：修复工具卡消失和确认卡被覆盖。
+
+### 2. Kizuna 性能优化
+- 结论/产出：优化远程图片与多图缩略图处理。
+
+### 3. Kizuna 测试验证
+- 结论/产出：完成测试环境部署和真机验收。
+
+### 4. MagClaw Team Sharing
+- 结论/产出：修复误触发并发布新版本。
+<!-- AI_SUMMARY_END -->
+"""
+
+        brief = recap_manager.build_weekly_brief_from_note(note)
+
+        self.assertIn("1. Kizuna", brief)
+        self.assertIn("   - 创角问题修复：修复工具卡消失和确认卡被覆盖。", brief)
+        self.assertIn("   - 性能优化：优化远程图片与多图缩略图处理。", brief)
+        self.assertIn("   - 测试验证：完成测试环境部署和真机验收。", brief)
+        self.assertIn("2. MagClaw Team Sharing：修复误触发并发布新版本。", brief)
+        self.assertNotIn("2. Kizuna", brief)
+
+    def test_weekly_brief_groups_repeated_cjk_project_prefixes(self):
+        # Latin-only prefix detection left Chinese project names ungrouped, so a week of
+        # 创角* modules still printed several top-level items with the same leading words.
+        note = """<!-- AI_SUMMARY_START -->
+### 1. 创角问题修复
+- 结论/产出：修复工具卡消失。
+
+### 2. 创角性能优化
+- 结论/产出：优化多图缩略图。
+
+### 3. 记忆系统迁移
+- 结论/产出：完成端口切换。
+<!-- AI_SUMMARY_END -->
+"""
+
+        brief = recap_manager.build_weekly_brief_from_note(note)
+
+        self.assertIn("1. 创角", brief)
+        self.assertIn("   - 问题修复：修复工具卡消失。", brief)
+        self.assertIn("   - 性能优化：优化多图缩略图。", brief)
+        self.assertIn("2. 记忆系统迁移：完成端口切换。", brief)
+        self.assertNotIn("2. 创角", brief)
+
+    def test_weekly_brief_never_drops_work_silently(self):
+        mods = "".join(
+            f"### {i}. Kizuna 模块{i}\n- 结论/产出：产出{i}。\n\n"
+            for i in range(1, recap_manager.MAX_BRIEF_SUBITEMS + 3)
+        )
+
+        brief = recap_manager.build_weekly_brief_from_note(
+            "<!-- AI_SUMMARY_START -->\n" + mods + "<!-- AI_SUMMARY_END -->\n"
+        )
+
+        self.assertIn("另有 2 项同项目工作", brief)
+
+    def test_weekly_brief_prefix_tolerates_empty_title(self):
+        # A malformed "### 1. " heading used to raise IndexError and kill the command.
+        self.assertEqual(recap_manager.weekly_brief_prefix(""), "")
+        self.assertEqual(recap_manager.weekly_brief_prefix("   "), "")
 
     def test_base_index_content_is_valid_yaml_shape(self):
         for kind in ("daily", "weekly"):

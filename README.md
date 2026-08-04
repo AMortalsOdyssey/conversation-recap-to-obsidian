@@ -137,6 +137,8 @@ python scripts/recap_manager.py verify-note \
 
 ### 6) Print a group-sendable weekly brief
 
+The brief groups repeated modules under the same project prefix so one project does not occupy several top-level numbered items. Treat the command output as a draft and merge its subitems into short categories such as fixes, optimizations, verification, or releases when needed.
+
 ```bash
 python scripts/recap_manager.py print-weekly-brief \
   --path "weekly/2026/06/2026-06-21.md"
