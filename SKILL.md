@@ -143,7 +143,7 @@ When asked to refresh the daily summary:
 - Keep all major same-day work visible, but compress each item to the smallest useful unit.
 - The default item shape is one line: `事项名：结果或产出`.
 - Every work item keeps its outcome. Items past the numbered highlight limit drop to a terser bullet, but never to a titles-only list — a bare title tells a reviewer nothing about what the item achieved.
-- The generated block is a draft. When the script's ordering buries a genuinely major item, or `关键判断` ends up dominated by one topic, rewrite the block by hand and rerun `verify-note --fix`. The raw entries remain the source of truth, so a later refresh can safely regenerate it.
+- The script's output is a draft and you own the final block. Judge it yourself: if the ordering buries an item that actually mattered more than the ones above it, or `关键判断` ends up dominated by a single topic, rewrite the block and rerun `verify-note --fix`. Decide from the day's content, not from the script's ordering — file order reflects when entries were appended, not importance. The raw entries remain the source of truth, so a later refresh can safely regenerate it.
 - Put detailed problem / solution / evidence in the raw session entry, not in the daily summary.
 - Use `关键判断` only for reusable decisions, constraints, or lessons; do not copy every key point from every entry, and skip process evidence such as tests, commits, pushes, and dirty-tree handling.
 - Keep links limited to durable notes or outputs.
@@ -249,8 +249,8 @@ Writing guidance:
 - Preserve the weekly note’s ranking, but optimize for quick scanning in a group chat. A reader should understand the week from project names and category labels alone.
 - Treat `print-weekly-brief` output as a structured draft. If it still exposes module-level repetition, rewrite it into project-level groups before returning it.
 - Avoid this verbose shape: four consecutive numbered items all starting with the same project name.
-- Grouping fires automatically on a repeated leading latin token (`Kizuna`, `MagClaw`) and on a shared CJK prefix of two or more characters (`创角`, `记忆`). It cannot tell that two differently-named modules belong to the same project, so merge those by hand.
-- The command reports overflow as `另有 N 项…` instead of dropping it. Replace those lines with the real items or keep them, but never just delete them — a brief sent to a group chat must not quietly lose a workstream.
+- The script only groups what it can prove from the title text: a repeated leading latin token (`Kizuna`, `MagClaw`) or a shared CJK prefix of two or more characters (`创角`, `记忆`). Same-project modules whose titles share no prefix are yours to group — you have the week's context and the script does not, so decide the project boundaries from what the work actually was and regroup accordingly.
+- The command reports overflow as `另有 N 项…` rather than dropping it. Decide what each such line becomes: expand it into the real items when they carry weight, or fold it into the sibling categories when it does not. The only hard rule is that the work cannot disappear — a brief sent to a group chat must not quietly lose a workstream.
 - In the final reply, include the group-sendable block and briefly mention the Obsidian weekly note path.
 
 ## Tagging guidance
