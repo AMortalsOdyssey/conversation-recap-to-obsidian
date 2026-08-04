@@ -42,7 +42,8 @@ This skill is useful if you:
 - **Handwritten content stays safe**: the skill only replaces the generated summary block and does not overwrite the rest of the note
 - **Weekly reports are grouped by topic**: if one task spans three days, it appears as one merged weekly module rather than three separate day-based notes
 - **Three-layer structure**: raw entries → daily summary → weekly report
-- **Session entries stay compact**: raw entries use `结果` / `处理` / `要点` / `文档` / `标签` instead of verbose problem-solution transcripts
+- **Session entries stay compact**: raw entries use `结果` / `处理` / `要点` / `文档` / `标签` instead of verbose problem-solution transcripts, plus an optional `问题` line when the item fixed something
+- **Nothing is dropped silently**: a supplied `--problem` is persisted (it is the only source for the weekly `核心解决的问题` field), truncated fields always end with `…`, and every daily item keeps its outcome instead of collapsing into a titles-only list
 - **Daily summaries are scannable**: the generated block uses `今日重点` / `关键判断` / `文档与标签` instead of long semicolon-heavy lines
 - **Saved notes are verifiable**: the helper can reread a saved note, check `word_count`, and fix it when needed
 - **Weekly reports can produce a shareable brief**: the helper reads the saved weekly report and prints a compact version

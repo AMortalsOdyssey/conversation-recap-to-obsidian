@@ -22,6 +22,9 @@ DEFAULTS = {
 }
 START = "<!-- AI_SUMMARY_START -->"
 END = "<!-- AI_SUMMARY_END -->"
+# How many 今日重点 items get the numbered, longer-outcome treatment. Items beyond
+# this still appear with their own outcome, just more tersely.
+DAILY_SUMMARY_HIGHLIGHT_LIMIT = 8
 ALLOWED_EXTS = {"md", "py", "ts", "tsx", "js", "json", "yaml", "yml"}
 ERROR_PREFIX_RE = re.compile(r'^\s*Error:\s+', re.M)
 FILE_NOT_FOUND_RE = re.compile(r'^\s*Error:\s+File\s+".*?"\s+not found\.\s*$', re.M)
@@ -457,17 +460,25 @@ def squash_spaces(text: str) -> str:
 
 
 def shorten_text(text: str, limit: int = 76) -> str:
+    """Shorten text to limit, always marking that something was dropped.
+
+    Truncation must never be silent. Cutting at a clause separator used to
+    return the head with no marker, so a line that lost its second half still
+    read as a complete sentence: "根因是 X 只对 Path B 生效" looked final while the
+    part describing the actual fix was gone. A reviewer cannot recover what they
+    cannot see was removed, so every truncated result now ends with an ellipsis.
+    """
     text = squash_spaces(text)
     if len(text) <= limit:
         return text
     threshold = max(24, limit // 2)
     punct_cut = max(text.rfind(sep, 0, limit) for sep in ('；', '。', '，', '、', ',', ';', '.'))
     if punct_cut >= threshold:
-        return text[:punct_cut].rstrip('；。，,;. ')
+        return text[:punct_cut].rstrip('；。，,;. ') + '…'
     space_cut = text.rfind(' ', 0, limit)
     if space_cut >= threshold:
-        return text[:space_cut].rstrip('；。，,;. ') + '...'
-    return text[:limit].rstrip('；。，,;. ') + '...'
+        return text[:space_cut].rstrip('；。，,;. ') + '…'
+    return text[:limit].rstrip('；。，,;. ') + '…'
 
 
 def split_atomic_points(text: str) -> List[str]:
@@ -545,14 +556,20 @@ def build_daily_summary_from_note(note_text: str) -> str:
         )
 
     tags.extend(derive_tags_from_title(' '.join(item['title'] for item in work_items)))
-    summary_items = work_items[:5]
+    # Every work item keeps its outcome. The old shape kept 5 items and collapsed the
+    # rest into a titles-only "其余事项" blob, so on a busy day a genuinely major item
+    # (e.g. a P0 that bricked sessions) was reduced to a bare noun phrase with no
+    # result — the one thing a daily review needs. Overflow items now get their own
+    # line with a shorter outcome, which keeps the section scannable without hiding
+    # what any of them actually achieved.
+    summary_items = work_items[:DAILY_SUMMARY_HIGHLIGHT_LIMIT]
     lines = ['## 今日总结', '', '### 今日重点']
     for idx, item in enumerate(summary_items, 1):
         result = item['conclusion'] or item['solution'] or item['problem'] or '已记录该事项。'
-        lines.append(f'{idx}. **{item["title"]}**：{shorten_text(result, 60)}')
-    if len(work_items) > len(summary_items):
-        remaining = '、'.join(item['title'] for item in work_items[len(summary_items):])
-        lines.append(f'- 其余事项：{shorten_text(remaining, 96)}')
+        lines.append(f'{idx}. **{item["title"]}**：{shorten_text(result, 84)}')
+    for item in work_items[len(summary_items):]:
+        result = item['conclusion'] or item['solution'] or item['problem'] or '已记录该事项。'
+        lines.append(f'- **{item["title"]}**：{shorten_text(result, 56)}')
 
     strong_decisions = [point for point in uniq_keep_order(key_points) if not is_low_value_decision(point)]
     decisions = (strong_decisions or uniq_keep_order(key_points))[:3]
@@ -645,13 +662,18 @@ def build_weekly_report(week_start: dt.date, week_end: dt.date, items: Dict[str,
     else:
         for idx, item in enumerate(ranked, 1):
             dates = '、'.join(sorted(set(item['dates'])))
-            problems = '；'.join(uniq_keep_order(item['problems'])[:3]) or '无'
+            problems = '；'.join(uniq_keep_order(item['problems'])[:3])
             key_points = '；'.join(uniq_keep_order(item['key_points'])[:4]) or '无'
             conclusions = '；'.join(uniq_keep_order(item['conclusions'])[:3]) or '无'
+            body_lines.append(f'### {idx}. {item["title"]}')
+            body_lines.append(f'- 涉及日期：{dates}')
+            # Omit rather than assert 无. Only a 问题 line can populate this, so a daily
+            # entry written without --problem used to render "核心解决的问题：无", which
+            # reads as "this solved nothing" instead of "nobody recorded it". Never
+            # backfill it from 处理/结果 either — the fix is not the problem.
+            if problems:
+                body_lines.append(f'- 核心解决的问题：{problems}')
             body_lines += [
-                f'### {idx}. {item["title"]}',
-                f'- 涉及日期：{dates}',
-                f'- 核心解决的问题：{problems}',
                 f'- 关键点：{key_points}',
                 f'- 结论/产出：{conclusions}',
                 f'- 相关文档：{render_link_line(uniq_keep_order(item["links"]))}',
@@ -790,20 +812,33 @@ views:
 
 
 def build_entry_block(args) -> str:
+    """Render one raw session entry.
+
+    The 问题 line must be written even though it makes the entry one line longer.
+    parse_structured_fields already maps 问题 back to `problem`, and both the daily
+    refresh and the weekly builder read that field — but nothing ever wrote it, so
+    `--problem` was a required argument whose value went nowhere, and every weekly
+    module built from daily notes reported 核心解决的问题：无. Persisting it makes the
+    append → refresh → weekly round trip lossless, which is the whole point of the
+    entry layer being source material rather than a one-off summary.
+    """
     now = args.time or dt.datetime.now().strftime('%H:%M')
     title = clean_title(args.title)
     tags = [x.strip().lstrip('#') for x in (args.tags or '').split(',') if x.strip()]
     tags.extend(derive_tags_from_title(title))
     links = [x.strip() for x in (args.links or '').split(',') if x.strip()]
     key_points = '；'.join(split_atomic_points(args.key_points)[:2]) or args.key_points
-    return (
-        f'#### {title} — {now}\n\n'
-        f'- **结果**: {shorten_text(args.conclusion, 96)}\n'
-        f'- **处理**: {shorten_text(args.solution, 104)}\n'
-        f'- **要点**: {shorten_text(key_points, 112)}\n'
-        f'- **文档**: {render_link_line(links, limit=3)}\n'
-        f'- **标签**: {render_tags_line(tags, limit=3)}\n'
-    )
+    lines = [f'#### {title} — {now}', '', f'- **结果**: {shorten_text(args.conclusion, 120)}']
+    problem = squash_spaces(args.problem or '')
+    if problem:
+        lines.append(f'- **问题**: {shorten_text(problem, 132)}')
+    lines.extend([
+        f'- **处理**: {shorten_text(args.solution, 140)}',
+        f'- **要点**: {shorten_text(key_points, 140)}',
+        f'- **文档**: {render_link_line(links, limit=3)}',
+        f'- **标签**: {render_tags_line(tags, limit=3)}',
+    ])
+    return '\n'.join(lines) + '\n'
 
 
 def cmd_append_entry(args):
@@ -919,7 +954,12 @@ def main():
     a.add_argument('--date')
     a.add_argument('--time')
     a.add_argument('--title', required=True)
-    a.add_argument('--problem', required=True)
+    a.add_argument(
+        '--problem',
+        default='',
+        help='What was broken. Rendered as a 问题 line and is the only source for the '
+             'weekly 核心解决的问题 field. Omit for a terser five-line entry.',
+    )
     a.add_argument('--solution', required=True)
     a.add_argument('--conclusion', required=True)
     a.add_argument('--key-points', required=True)

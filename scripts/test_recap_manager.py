@@ -28,8 +28,105 @@ class DailySummaryFormatTests(unittest.TestCase):
         self.assertIn("- **处理**:", entry)
         self.assertIn("- **要点**:", entry)
         self.assertIn("- **文档**:", entry)
-        self.assertNotIn("- **问题**:", entry)
         self.assertNotIn("- **方案**:", entry)
+        # A supplied problem must be persisted: it is the only source for the weekly
+        # 核心解决的问题 field, so discarding it made --problem a no-op argument.
+        self.assertIn("- **问题**:", entry)
+        self.assertIn("阅读成本高", entry)
+
+    def test_entry_block_omits_problem_line_when_not_supplied(self):
+        class Args:
+            time = "18:40"
+            title = "Skill 摘要格式优化"
+            problem = ""
+            solution = "把 entry 层压缩为结果、处理、要点、文档、标签。"
+            conclusion = "Daily Note 变成更适合快速回看的结构。"
+            key_points = "详细证据留在原始上下文；日报只保留可复用结论。"
+            links = "project/changelog/features/browser-layout.md"
+            tags = "summary-skill,obsidian"
+
+        entry = recap_manager.build_entry_block(Args)
+
+        self.assertNotIn("- **问题**:", entry)
+        self.assertEqual(entry.count("- **"), 5)
+
+    def test_entry_problem_survives_round_trip_into_weekly_field(self):
+        class Args:
+            time = "09:00"
+            title = "登录 401 排障"
+            problem = "登录后立刻 401 被踢回，测试与正式环境都复现。"
+            solution = "补 JWKS 公钥验签并修正 issuer。"
+            conclusion = "两个环境恢复正常。"
+            key_points = "先确认 session claims，再加严格校验。"
+            links = ""
+            tags = "auth"
+
+        entry = recap_manager.build_entry_block(Args)
+        body = entry.split("\n", 2)[2]
+        fields = recap_manager.parse_structured_fields(body)
+
+        self.assertIn("401", fields["problem"])
+
+    def test_daily_summary_keeps_outcome_for_overflow_items(self):
+        # Overflow items used to collapse into a titles-only "其余事项" blob, which hid
+        # what a major item actually achieved on a busy day.
+        entries = []
+        for i in range(1, recap_manager.DAILY_SUMMARY_HIGHLIGHT_LIMIT + 2):
+            entries.append(
+                f"#### 事项{i} — 0{i % 10}:00\n\n"
+                f"- **结果**: 结果{i}落地并部署\n"
+                f"- **处理**: 做法{i}\n"
+                f"- **要点**: 要点{i}\n"
+                f"- **文档**: 无\n"
+                f"- **标签**: #t\n"
+            )
+        note = "---\ndate: 2026-08-04\ntype: daily\n---\n# 2026-08-04\n\n" + "\n".join(entries)
+
+        summary = recap_manager.build_daily_summary_from_note(note)
+        highlights = summary.split("### 关键判断")[0]
+        last = recap_manager.DAILY_SUMMARY_HIGHLIGHT_LIMIT + 1
+
+        self.assertNotIn("其余事项", highlights)
+        self.assertIn(f"**事项{last}**：结果{last}落地并部署", highlights)
+
+    def test_weekly_module_omits_problem_line_when_never_recorded(self):
+        # "核心解决的问题：无" reads as "this solved nothing" rather than "nobody wrote
+        # it down"; entries in the compact shape legitimately have no 问题 line.
+        without_problem = {
+            'compact': {
+                'title': '只有紧凑字段的事项',
+                'dates': ['2026-08-04'],
+                'problems': [],
+                'key_points': ['一条可复用结论'],
+                'conclusions': ['已部署并验证'],
+                'links': [],
+                'tags': ['t'],
+            }
+        }
+        body = recap_manager.build_weekly_report(
+            dt.date(2026, 8, 3), dt.date(2026, 8, 9), without_problem
+        )
+
+        self.assertNotIn('核心解决的问题', body)
+        self.assertIn('结论/产出：已部署并验证', body)
+
+        with_problem = dict(without_problem)
+        with_problem['compact'] = dict(without_problem['compact'], problems=['登录后 401'])
+        body_with = recap_manager.build_weekly_report(
+            dt.date(2026, 8, 3), dt.date(2026, 8, 9), with_problem
+        )
+
+        self.assertIn('核心解决的问题：登录后 401', body_with)
+
+    def test_shorten_text_always_marks_truncation(self):
+        # Cutting at a clause separator used to return the head with no marker, so a
+        # line that lost its second half still read as a finished sentence.
+        text = "根因是里程碑调度只对 Path B 生效，因此 Path A 全程只剩一个落档点，改 flushReason 一处即可"
+        short = recap_manager.shorten_text(text, 40)
+
+        self.assertLessEqual(len(short), 41)
+        self.assertTrue(short.endswith("…"), short)
+        self.assertEqual(recap_manager.shorten_text("很短的一句话", 40), "很短的一句话")
 
     def test_daily_summary_uses_scannable_sections(self):
         note = """---

@@ -82,11 +82,14 @@ Create a new item in the daily note as source material for later summaries.
 #### 事项标题 — HH:mm
 
 - **结果**: ...
+- **问题**: ...
 - **处理**: ...
 - **要点**: ...
 - **文档**: [[...]] · [[...]]
 - **标签**: #tag-a #tag-b
 ```
+
+`问题` is optional and only rendered when `--problem` is supplied. Supply it whenever the item fixed something: it is the **only** source for the weekly `核心解决的问题` field, so an entry written without it cannot contribute that field to any later weekly report.
 
 ### Session recap guidance
 
@@ -96,7 +99,8 @@ Create a new item in the daily note as source material for later summaries.
 - The title should describe the work item, not just say “对话总结”.
 - Use tags sparingly; 1-3 strong tags are enough.
 - `结果` is the final outcome or durable state.
-- `处理` is the shortest useful description of what changed or how it was handled.
+- `问题` is the user-visible symptom or the gap being closed. Keep it about what was wrong, never about the fix.
+- `处理` is the shortest useful description of what changed or how it was handled. Make it a self-contained statement that names the fix, not only the root cause — a reader who sees only this line should still know what was done.
 - `要点` is for 1-2 reusable decisions, constraints, or lessons. Do not paste test logs or every implementation detail.
 - Keep process evidence such as tests, commits, pushes, and dirty-tree handling out of `要点` unless it is the actual lesson.
 - `文档` should include only the strongest durable links, normally 1-3.
@@ -138,6 +142,8 @@ When asked to refresh the daily summary:
 - If multiple sessions worked on the same thing, describe it once more strongly.
 - Keep all major same-day work visible, but compress each item to the smallest useful unit.
 - The default item shape is one line: `事项名：结果或产出`.
+- Every work item keeps its outcome. Items past the numbered highlight limit drop to a terser bullet, but never to a titles-only list — a bare title tells a reviewer nothing about what the item achieved.
+- The generated block is a draft. When the script's ordering buries a genuinely major item, or `关键判断` ends up dominated by one topic, rewrite the block by hand and rerun `verify-note --fix`. The raw entries remain the source of truth, so a later refresh can safely regenerate it.
 - Put detailed problem / solution / evidence in the raw session entry, not in the daily summary.
 - Use `关键判断` only for reusable decisions, constraints, or lessons; do not copy every key point from every entry, and skip process evidence such as tests, commits, pushes, and dirty-tree handling.
 - Keep links limited to durable notes or outputs.
@@ -342,6 +348,9 @@ Use these indexes as browsing/review surfaces inside Obsidian. Do not treat them
 - Do not blindly append a second stale summary if the user asked for refresh/regeneration.
 - Do not reduce weekly review into a chronological diary.
 - If source notes are weak, still try to infer stable work modules from headings and structured bullets.
+- Read the target note before summarizing. Other agents and sessions append to the same daily note, so it may already contain entries for today — check for an existing entry covering the same work instead of adding a near-duplicate, and give the entry a title that distinguishes it from similarly-named work already there.
+- When a session spans past midnight, file each work item under the date it actually happened rather than forcing everything into today's note. Creating the earlier date's note is correct and keeps weekly synthesis accurate.
+- After every write, reread the saved file and confirm the fields are complete sentences. Field limits truncate, and a truncated line is only marked with a trailing `…`; if a line lost its point, rewrite it shorter rather than leaving the fragment.
 
 ## Success bar
 
