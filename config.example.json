@@ -4,5 +4,6 @@
   "daily_dir": "daily",
   "weekly_dir": "weekly",
   "index_dir": "index",
+  "queue_db": "",
   "obsidian_bin": "obsidian"
 }

@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -19,6 +21,7 @@ DEFAULTS = {
     "daily_dir": "Memory/daily",
     "weekly_dir": "Memory/weekly",
     "index_dir": "Memory/index",
+    "queue_db": "",
 }
 START = "<!-- AI_SUMMARY_START -->"
 END = "<!-- AI_SUMMARY_END -->"
@@ -42,7 +45,7 @@ def load_config(cli_args: argparse.Namespace) -> Dict[str, Any]:
                 config.update({k: v for k, v in file_cfg.items() if v not in (None, '')})
         except Exception:
             pass
-    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir', 'index_dir'):
+    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir', 'index_dir', 'queue_db'):
         val = getattr(cli_args, key, None)
         if val:
             config[key] = val
@@ -74,14 +77,79 @@ def note_fs_path(config: Dict[str, Any], path: str) -> Path | None:
     return root / Path(path)
 
 
+def path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def queue_db_path(config: Dict[str, Any]) -> Path:
+    configured = str(config.get('queue_db') or '').strip()
+    path = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / '.local' / 'state' / 'conversation-recap' / 'queue.db'
+    ).resolve()
+
+    forbidden_roots = [Path(__file__).resolve().parent.parent]
+    vault_root = resolve_vault_root(config)
+    if vault_root is not None:
+        forbidden_roots.append(vault_root.resolve())
+    if any(path_is_within(path, root) for root in forbidden_roots):
+        raise ValueError('queue_db must stay outside the vault and the skill repository')
+    return path
+
+
+def queue_connect(config: Dict[str, Any]) -> sqlite3.Connection:
+    path = queue_db_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    init_lock_path = path.parent / 'queue-init.lock'
+    conn: sqlite3.Connection | None = None
+    with open(init_lock_path, 'w') as init_lock:
+        fcntl.flock(init_lock.fileno(), fcntl.LOCK_EX)
+        try:
+            conn = sqlite3.connect(path, timeout=30)
+            conn.execute('PRAGMA busy_timeout=30000')
+            journal_mode = str(conn.execute('PRAGMA journal_mode').fetchone()[0]).lower()
+            if journal_mode != 'wal':
+                conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entry_queue (
+                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                  status     TEXT NOT NULL DEFAULT 'pending',
+                  date       TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  payload    TEXT NOT NULL,
+                  error      TEXT
+                )
+                """
+            )
+            conn.commit()
+        except Exception:
+            if conn is not None:
+                conn.close()
+            raise
+        finally:
+            fcntl.flock(init_lock.fileno(), fcntl.LOCK_UN)
+    assert conn is not None
+    return conn
+
+
+def lock_file_path(config: Dict[str, Any], path: str) -> Path:
+    lock_dir = queue_db_path(config).parent / 'locks'
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    vault_identity = str(resolve_vault_root(config) or config.get('vault') or 'default')
+    digest = hashlib.sha256(f'{vault_identity}\0{path}'.encode()).hexdigest()[:20]
+    safe_name = re.sub(r'[^A-Za-z0-9._-]+', '-', Path(path).name).strip('-') or 'note'
+    return lock_dir / f'{safe_name}-{digest}.lock'
+
+
 @contextmanager
 def note_lock(config: Dict[str, Any], path: str):
-    fs_path = note_fs_path(config, path)
-    if fs_path is None:
-        yield
-        return
-    fs_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = fs_path.with_suffix(fs_path.suffix + ".lock")
+    lock_path = lock_file_path(config, path)
     with open(lock_path, "w") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -155,6 +223,23 @@ def create_or_overwrite_note(config: Dict[str, Any], path: str, content: str) ->
         fs_path.write_text(content)
         return
     raise RuntimeError(f"obsidian CLI unavailable and vault path is unresolved for {path}")
+
+
+def read_note_direct(config: Dict[str, Any], path: str) -> str:
+    fs_path = note_fs_path(config, path)
+    if fs_path is None:
+        raise RuntimeError(f"vault path is unresolved for direct read: {path}")
+    if not fs_path.exists():
+        raise FileNotFoundError(path)
+    return strip_known_cli_noise(fs_path.read_text())
+
+
+def write_note_direct(config: Dict[str, Any], path: str, content: str) -> None:
+    fs_path = note_fs_path(config, path)
+    if fs_path is None:
+        raise RuntimeError(f"vault path is unresolved for direct write: {path}")
+    fs_path.parent.mkdir(parents=True, exist_ok=True)
+    fs_path.write_text(content)
 
 
 def append_note(config: Dict[str, Any], path: str, content: str) -> None:
@@ -418,6 +503,7 @@ def parse_structured_fields(body: str) -> Dict[str, str]:
         '处理': 'solution',
         '要点': 'key_points',
         '文档': 'links',
+        '工作项': 'work_items',
         '标签': 'tags',
     }
     out = {v: '' for v in labels.values()}
@@ -446,6 +532,32 @@ def render_link_line(links: List[str], limit: int = 8) -> str:
     for x in links:
         rendered.append(f'[[{x}]]' if not x.startswith('[[') else x)
     return ' · '.join(rendered)
+
+
+def parse_work_items_arg(text: str) -> List[str]:
+    return [item.strip() for item in (text or '').split(',') if item.strip()]
+
+
+def parse_rendered_work_items(text: str) -> List[str]:
+    items = []
+    for item in re.split(r'\s+·\s+', text or ''):
+        item = item.strip()
+        if item.startswith('`') and item.endswith('`'):
+            item = item[1:-1].strip()
+        if item:
+            items.append(item)
+    return items
+
+
+def render_work_items_line(items: List[str], limit: int = 8) -> str:
+    rendered = []
+    for item in uniq_keep_order(items)[:limit]:
+        item = item.strip()
+        if item.startswith('[[') and item.endswith(']]'):
+            rendered.append(item)
+        else:
+            rendered.append(f'`{item.strip("`")}`')
+    return ' · '.join(rendered) if rendered else '无'
 
 
 def render_tags_line(tags: List[str], limit: int = 6) -> str:
@@ -525,7 +637,7 @@ def derive_tags_from_title(title: str) -> List[str]:
 
 def build_daily_summary_from_note(note_text: str) -> str:
     sections = extract_sections(note_text)
-    work_items, key_points, links, tags = [], [], [], []
+    work_items, key_points, links, tags, referenced_work_items = [], [], [], [], []
     for s in sections:
         f = parse_structured_fields(s['body'])
         work_items.append({
@@ -538,6 +650,7 @@ def build_daily_summary_from_note(note_text: str) -> str:
             key_points.extend(split_atomic_points(f['key_points']))
         links.extend(extract_wikilinks(f.get('links', '')))
         links.extend(extract_inline_paths(f.get('links', '')))
+        referenced_work_items.extend(parse_rendered_work_items(f.get('work_items', '')))
         tags.extend(parse_tags_text(f.get('tags', '')))
         tags.extend(parse_tags_text(s['body']))
 
@@ -579,9 +692,10 @@ def build_daily_summary_from_note(note_text: str) -> str:
     else:
         lines.append('- 无')
 
+    lines.extend(['', '### 文档与标签'])
+    if referenced_work_items:
+        lines.append(f'- 工作项：{render_work_items_line(referenced_work_items, limit=8)}')
     lines.extend([
-        '',
-        '### 文档与标签',
         f'- 文档：{render_link_line(links, limit=5)}',
         f'- 标签：{render_tags_line(tags, limit=8)}',
     ])
@@ -629,7 +743,7 @@ def gather_week_items(config: Dict[str, Any], week_start: dt.date, week_end: dt.
             for sec in sections:
                 fields = parse_structured_fields(sec['body'])
                 bucket = normalize_bucket(sec['title'])
-                item = buckets.setdefault(bucket, {'title': bucket, 'dates': [], 'problems': [], 'key_points': [], 'conclusions': [], 'links': [], 'tags': []})
+                item = buckets.setdefault(bucket, {'title': bucket, 'dates': [], 'problems': [], 'key_points': [], 'conclusions': [], 'links': [], 'work_items': [], 'tags': []})
                 item['dates'].append(d.isoformat())
                 if fields['problem']:
                     item['problems'].append(fields['problem'])
@@ -639,6 +753,7 @@ def gather_week_items(config: Dict[str, Any], week_start: dt.date, week_end: dt.
                     item['conclusions'].append(fields['conclusion'])
                 item['links'].extend(extract_wikilinks(fields.get('links', '')))
                 item['links'].extend(extract_inline_paths(fields.get('links', '')))
+                item['work_items'].extend(parse_rendered_work_items(fields.get('work_items', '')))
                 item['tags'].extend(parse_tags_text(fields.get('tags', '')))
                 item['tags'].extend(parse_tags_text(sec['body']))
                 item['tags'].extend(derive_tags_from_title(sec['title']))
@@ -646,7 +761,7 @@ def gather_week_items(config: Dict[str, Any], week_start: dt.date, week_end: dt.
             loose = extract_loose_bullets(text)
             if loose:
                 bucket = '零散工作记录'
-                item = buckets.setdefault(bucket, {'title': bucket, 'dates': [], 'problems': [], 'key_points': [], 'conclusions': [], 'links': [], 'tags': []})
+                item = buckets.setdefault(bucket, {'title': bucket, 'dates': [], 'problems': [], 'key_points': [], 'conclusions': [], 'links': [], 'work_items': [], 'tags': []})
                 item['dates'].append(d.isoformat())
                 item['key_points'].extend(loose[:5])
 
@@ -677,9 +792,11 @@ def build_weekly_report(week_start: dt.date, week_end: dt.date, items: Dict[str,
                 f'- 关键点：{key_points}',
                 f'- 结论/产出：{conclusions}',
                 f'- 相关文档：{render_link_line(uniq_keep_order(item["links"]))}',
-                f'- 标签：{render_tags_line(item["tags"])}',
-                ''
             ]
+            referenced_work_items = item.get('work_items', [])
+            if referenced_work_items:
+                body_lines.append(f'- 相关工作项：{render_work_items_line(referenced_work_items)}')
+            body_lines += [f'- 标签：{render_tags_line(item["tags"])}', '']
         overall = '；'.join([f'本周主要推进了 {x["title"]}' for x in ranked[:3]])
         body_lines += ['## 本周总体结论', f'- {overall}', END, '']
     body = '\n'.join(body_lines)
@@ -724,6 +841,7 @@ def parse_weekly_module_fields(body: str) -> Dict[str, str]:
         '关键点': 'key_points',
         '结论/产出': 'conclusion',
         '相关文档': 'links',
+        '相关工作项': 'work_items',
         '标签': 'tags',
     }
     out = {v: '' for v in labels.values()}
@@ -910,6 +1028,7 @@ def build_entry_block(args) -> str:
     tags = [x.strip().lstrip('#') for x in (args.tags or '').split(',') if x.strip()]
     tags.extend(derive_tags_from_title(title))
     links = [x.strip() for x in (args.links or '').split(',') if x.strip()]
+    work_items = parse_work_items_arg(getattr(args, 'work_items', '') or '')
     key_points = '；'.join(split_atomic_points(args.key_points)[:2]) or args.key_points
     lines = [f'#### {title} — {now}', '', f'- **结果**: {shorten_text(args.conclusion, 120)}']
     problem = squash_spaces(args.problem or '')
@@ -918,25 +1037,137 @@ def build_entry_block(args) -> str:
     lines.extend([
         f'- **处理**: {shorten_text(args.solution, 140)}',
         f'- **要点**: {shorten_text(key_points, 140)}',
+    ])
+    if work_items:
+        lines.append(f'- **工作项**: {render_work_items_line(work_items, limit=3)}')
+    lines.extend([
         f'- **文档**: {render_link_line(links, limit=3)}',
         f'- **标签**: {render_tags_line(tags, limit=3)}',
     ])
     return '\n'.join(lines) + '\n'
 
 
+def entry_payload_from_args(args) -> Dict[str, str]:
+    return {
+        'title': args.title,
+        'problem': args.problem,
+        'solution': args.solution,
+        'conclusion': args.conclusion,
+        'key_points': args.key_points,
+        'links': args.links,
+        'tags': args.tags,
+        'time': args.time or '',
+        'work_items': getattr(args, 'work_items', '') or '',
+    }
+
+
+def enqueue_entry(config: Dict[str, Any], date: dt.date, payload: Dict[str, str]) -> int:
+    with closing(queue_connect(config)) as conn:
+        cursor = conn.execute(
+            'INSERT INTO entry_queue (date, created_at, payload) VALUES (?, ?, ?)',
+            (
+                date.isoformat(),
+                dt.datetime.now().astimezone().isoformat(timespec='seconds'),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def queue_entry_result(config: Dict[str, Any], entry_id: int) -> tuple[str, str | None]:
+    with closing(queue_connect(config)) as conn:
+        row = conn.execute(
+            'SELECT status, error FROM entry_queue WHERE id = ?',
+            (entry_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(f'queued entry disappeared: {entry_id}')
+    return str(row[0]), row[1]
+
+
+def flush_pending(config: Dict[str, Any]) -> Dict[str, int]:
+    flushed = 0
+    failed = 0
+    conn = queue_connect(config)
+    try:
+        while True:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                "SELECT id, date, payload FROM entry_queue "
+                "WHERE status = 'pending' ORDER BY id LIMIT 50"
+            ).fetchall()
+            if not rows:
+                conn.commit()
+                break
+
+            grouped: Dict[str, List[tuple[int, str]]] = {}
+            for entry_id, date_text, payload_text in rows:
+                grouped.setdefault(str(date_text), []).append((int(entry_id), str(payload_text)))
+
+            for date_text, queued_entries in grouped.items():
+                ids = [entry_id for entry_id, _ in queued_entries]
+                placeholders = ','.join('?' for _ in ids)
+                try:
+                    date = parse_date(date_text)
+                    path = daily_path(config, date)
+                    with note_lock(config, path):
+                        try:
+                            existing = read_note_direct(config, path)
+                        except FileNotFoundError:
+                            existing = ''
+                        updated = normalize_daily_note(existing, date)
+                        for _, payload_text in queued_entries:
+                            payload = json.loads(payload_text)
+                            updated = insert_before_summary_block(
+                                updated,
+                                build_entry_block(argparse.Namespace(**payload)),
+                            )
+                        summary = build_daily_summary_from_note(updated)
+                        updated = replace_summary_block(updated, summary)
+                        write_note_direct(config, path, normalize_daily_note(updated, date))
+                    conn.execute(
+                        f"UPDATE entry_queue SET status = 'done', error = NULL WHERE id IN ({placeholders})",
+                        ids,
+                    )
+                    flushed += len(ids)
+                except Exception as exc:
+                    conn.execute(
+                        f"UPDATE entry_queue SET status = 'failed', error = ? WHERE id IN ({placeholders})",
+                        [str(exc), *ids],
+                    )
+                    failed += len(ids)
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    with closing(queue_connect(config)) as count_conn:
+        remaining = int(
+            count_conn.execute(
+                "SELECT COUNT(*) FROM entry_queue WHERE status = 'pending'"
+            ).fetchone()[0]
+        )
+    return {'flushed': flushed, 'failed': failed, 'remaining': remaining}
+
+
 def cmd_append_entry(args):
     config = load_config(args)
     date = parse_date(args.date) if args.date else dt.date.today()
     path = daily_path(config, date)
-    with note_lock(config, path):
-        try:
-            existing = read_note(config, path)
-        except Exception:
-            existing = ''
-        normalized = normalize_daily_note(existing, date)
-        updated = insert_before_summary_block(normalized, build_entry_block(args))
-        create_or_overwrite_note(config, path, normalize_daily_note(updated, date))
+    entry_id = enqueue_entry(config, date, entry_payload_from_args(args))
+    flush_pending(config)
+    status, error = queue_entry_result(config, entry_id)
+    if status != 'done':
+        raise RuntimeError(error or f'queued entry {entry_id} did not reach done status')
     print(path)
+
+
+def cmd_flush_pending(args):
+    config = load_config(args)
+    print(json.dumps(flush_pending(config), ensure_ascii=False, sort_keys=True))
 
 
 def cmd_refresh_daily_auto(args):
@@ -945,13 +1176,29 @@ def cmd_refresh_daily_auto(args):
     path = daily_path(config, date)
     with note_lock(config, path):
         try:
-            existing = read_note(config, path)
-        except Exception:
+            existing = read_note_direct(config, path)
+        except FileNotFoundError:
             existing = ''
         normalized = normalize_daily_note(existing, date)
         summary = build_daily_summary_from_note(normalized)
         updated = replace_summary_block(normalized, summary)
-        create_or_overwrite_note(config, path, normalize_daily_note(updated, date))
+        write_note_direct(config, path, normalize_daily_note(updated, date))
+    print(path)
+
+
+def cmd_replace_summary(args):
+    config = load_config(args)
+    date = parse_date(args.date)
+    path = daily_path(config, date)
+    block = Path(args.file).expanduser().read_text()
+    if START in block or END in block:
+        raise ValueError('replacement block must omit AI_SUMMARY markers')
+    with note_lock(config, path):
+        existing = read_note_direct(config, path)
+        updated = replace_summary_block(existing, block)
+        meta, body = split_frontmatter(updated)
+        meta['word_count'] = count_body_chars(body)
+        write_note_direct(config, path, render_note(meta, body))
     print(path)
 
 
@@ -1026,6 +1273,7 @@ def add_common_args(p):
     p.add_argument('--daily-dir')
     p.add_argument('--weekly-dir')
     p.add_argument('--index-dir')
+    p.add_argument('--queue-db')
 
 
 def main():
@@ -1047,13 +1295,24 @@ def main():
     a.add_argument('--conclusion', required=True)
     a.add_argument('--key-points', required=True)
     a.add_argument('--links', default='')
+    a.add_argument('--work-items', default='')
     a.add_argument('--tags', default='')
     a.set_defaults(func=cmd_append_entry)
+
+    f = sub.add_parser('flush-pending', help='Flush queued session entries into their daily notes.')
+    add_common_args(f)
+    f.set_defaults(func=cmd_flush_pending)
 
     d = sub.add_parser('refresh-daily-auto', help='Read a daily note and regenerate its summary block.')
     add_common_args(d)
     d.add_argument('--date')
     d.set_defaults(func=cmd_refresh_daily_auto)
+
+    r = sub.add_parser('replace-summary', help='Replace one daily generated summary through the shared note lock.')
+    add_common_args(r)
+    r.add_argument('--date', required=True)
+    r.add_argument('--file', required=True)
+    r.set_defaults(func=cmd_replace_summary)
 
     w = sub.add_parser('generate-weekly-auto', help='Read daily notes for a week and generate a weekly report grouped by work item.')
     add_common_args(w)

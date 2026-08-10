@@ -85,11 +85,14 @@ Create a new item in the daily note as source material for later summaries.
 - **问题**: ...
 - **处理**: ...
 - **要点**: ...
+- **工作项**: [[文档#^块锚|工作项ID]] · `裸工作项ID`
 - **文档**: [[...]] · [[...]]
 - **标签**: #tag-a #tag-b
 ```
 
 `问题` is optional and only rendered when `--problem` is supplied. Supply it whenever the item fixed something: it is the **only** source for the weekly `核心解决的问题` field, so an entry written without it cannot contribute that field to any later weekly report.
+
+`工作项` is optional and only rendered when `--work-items` is supplied. When the conversation contains work-item IDs, pass the 1-3 most important ones. If you know the source document, use a complete stable link such as `[[20260806_63_双姓名修复方案#^cc-bklt-26806-4|CC-BKLT-26806-4]]`; otherwise pass the bare ID, which is rendered as inline code instead of a phantom link. Never invent an ID, document path, heading, or block anchor.
 
 ### Session recap guidance
 
@@ -104,6 +107,7 @@ Create a new item in the daily note as source material for later summaries.
 - `要点` is for 1-2 reusable decisions, constraints, or lessons. Do not paste test logs or every implementation detail.
 - Keep process evidence such as tests, commits, pushes, and dirty-tree handling out of `要点` unless it is the actual lesson.
 - `文档` should include only the strongest durable links, normally 1-3.
+- `工作项` should point to the source document's lowercase block anchor when one is known. Prefer block links over heading links because description edits should not break the reference.
 - Preserve document hierarchy: session entries belong in the raw entry section of the daily note, and the generated `## 今日总结` block should stay as a higher-level summary section near the end of the note.
 - When appending an entry to a daily note that already contains `## 今日总结`, insert the new entry **before** the generated summary block, then refresh the summary if needed.
 
@@ -131,6 +135,7 @@ When asked to refresh the daily summary:
 - ...
 
 ### 文档与标签
+- 工作项：[[文档#^块锚|工作项ID]]
 - 文档：[[...]] · [[...]]
 - 标签：#tag-a #tag-b
 ```
@@ -143,7 +148,7 @@ When asked to refresh the daily summary:
 - Keep all major same-day work visible, but compress each item to the smallest useful unit.
 - The default item shape is one line: `事项名：结果或产出`.
 - Every work item keeps its outcome. Items past the numbered highlight limit drop to a terser bullet, but never to a titles-only list — a bare title tells a reviewer nothing about what the item achieved.
-- The script's output is a draft and you own the final block. Judge it yourself: if the ordering buries an item that actually mattered more than the ones above it, or `关键判断` ends up dominated by a single topic, rewrite the block and rerun `verify-note --fix`. Decide from the day's content, not from the script's ordering — file order reflects when entries were appended, not importance. The raw entries remain the source of truth, so a later refresh can safely regenerate it.
+- The script's output is a draft and you own the final block. Judge it yourself: if the ordering buries an item that actually mattered more than the ones above it, or `关键判断` ends up dominated by a single topic, save the revised block to a temporary Markdown file and apply it with `replace-summary`. Decide from the day's content, not from the script's ordering — file order reflects when entries were appended, not importance. The raw entries remain the source of truth, so a later refresh can safely regenerate it.
 - Put detailed problem / solution / evidence in the raw session entry, not in the daily summary.
 - Use `关键判断` only for reusable decisions, constraints, or lessons; do not copy every key point from every entry, and skip process evidence such as tests, commits, pushes, and dirty-tree handling.
 - Keep links limited to durable notes or outputs.
@@ -190,6 +195,7 @@ Then the body uses modules like:
 - 关键点：...
 - 结论/产出：...
 - 相关文档：[[...]] · [[...]]
+- 相关工作项：[[文档#^块锚|工作项ID]]
 - 标签：#tag-a #tag-b
 ```
 
@@ -296,6 +302,8 @@ Resolve configuration in this order:
 2. `config.json` next to the skill
 3. built-in defaults
 
+Concurrent session entries are first committed to a standard-library SQLite queue, then synchronously drained under one shared file lock. The queue database, WAL/SHM files, and locks default to `~/.local/state/conversation-recap/`; they must never be placed in the Obsidian vault or the skill repository. There is no daemon or third-party queue service.
+
 ### Commands
 
 Append a session entry:
@@ -307,14 +315,29 @@ python scripts/recap_manager.py append-entry \
   --solution "补 JWKS 公钥验签并修正 issuer" \
   --conclusion "测试和正式环境恢复正常" \
   --key-points "先确认 session claims，再加严格校验" \
+  --work-items "[[docs/20260325_1_JWT修复方案#^auth-jwt-26325-1|AUTH-JWT-26325-1]]" \
   --links "app/core/auth/jwt_auth.py,deploy/config.k8s.yaml" \
   --tags "jwt,auth,线上排障"
+```
+
+Manually drain any entries left pending after an interrupted process:
+
+```bash
+python scripts/recap_manager.py flush-pending
 ```
 
 Refresh a daily summary:
 
 ```bash
 python scripts/recap_manager.py refresh-daily-auto --date 2026-03-25
+```
+
+Apply an Agent-polished daily summary block through the shared lock. The file contains the `## 今日总结` block without `AI_SUMMARY` markers:
+
+```bash
+python scripts/recap_manager.py replace-summary \
+  --date 2026-03-25 \
+  --file /tmp/recap-summary-block.md
 ```
 
 Generate a weekly report:
@@ -353,6 +376,8 @@ Use these indexes as browsing/review surfaces inside Obsidian. Do not treat them
 ## Important constraints
 
 - Do not invent documents or wikilinks.
+- Do not invent work-item IDs or targets. Pass complete `[[document#^lowercase-block-id|WORK-ITEM-ID]]` links when proven; pass a bare ID when the target is unknown.
+- All Daily Note content writes must go through `append-entry`, `refresh-daily-auto`, or `replace-summary`. Do not use Obsidian CLI `append`/`create`, direct filesystem edits, or an editor tool to modify a Daily Note; bypassing the queue and shared lock breaks concurrent-write safety.
 - Prefer documents explicitly connected to the current work item; do not sweep unrelated paths from the whole note into “相关文档”.
 - Do not blindly append a second stale summary if the user asked for refresh/regeneration.
 - Do not reduce weekly review into a chronological diary.

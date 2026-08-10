@@ -1,6 +1,11 @@
 import datetime as dt
 import contextlib
 import io
+import json
+import multiprocessing
+import os
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -8,6 +13,56 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import recap_manager
+
+
+def run_append_process(script: str, config_path: str, index: int) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            script,
+            'append-entry',
+            '--config',
+            config_path,
+            '--date',
+            '2026-08-10',
+            '--time',
+            f'10:{index:02d}',
+            '--title',
+            f'Concurrent item {index}',
+            '--solution',
+            f'Applied change {index}.',
+            '--conclusion',
+            f'Completed result {index}.',
+            '--key-points',
+            f'Keep decision {index}.',
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def kill_on_direct_write(config, path, content) -> None:
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def crash_during_flush(config) -> None:
+    recap_manager.write_note_direct = kill_on_direct_write
+    recap_manager.flush_pending(config)
+
+
+def make_test_config(root: Path):
+    vault = root / 'vault'
+    vault.mkdir()
+    return {
+        **recap_manager.DEFAULTS,
+        'obsidian_bin': '/missing/obsidian',
+        'vault': 'TestVault',
+        'vault_path': str(vault),
+        'daily_dir': 'daily',
+        'weekly_dir': 'weekly',
+        'index_dir': 'index',
+        'queue_db': str(root / 'state' / 'queue.db'),
+    }
 
 
 class DailySummaryFormatTests(unittest.TestCase):
@@ -308,6 +363,315 @@ word_count: 1
             meta, body = recap_manager.split_frontmatter(note_path.read_text())
 
             self.assertEqual(meta["word_count"], len(body))
+
+    def test_queue_insert_flush_round_trip_uses_wal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            payload = {
+                'title': 'Queue round trip',
+                'problem': '',
+                'solution': 'Drain the SQLite row.',
+                'conclusion': 'The entry reached the Daily Note.',
+                'key_points': 'Mark done only after the Markdown write.',
+                'links': '',
+                'tags': 'queue',
+                'time': '10:00',
+                'work_items': '',
+            }
+
+            entry_id = recap_manager.enqueue_entry(config, dt.date(2026, 8, 10), payload)
+            result = recap_manager.flush_pending(config)
+            status, error = recap_manager.queue_entry_result(config, entry_id)
+            note = (root / 'vault' / 'daily' / '2026' / '08' / '2026-08-10.md').read_text()
+            with contextlib.closing(recap_manager.queue_connect(config)) as conn:
+                journal_mode = conn.execute('PRAGMA journal_mode').fetchone()[0]
+
+            self.assertEqual(result, {'flushed': 1, 'failed': 0, 'remaining': 0})
+            self.assertEqual((status, error), ('done', None))
+            self.assertEqual(journal_mode.lower(), 'wal')
+            self.assertIn('#### Queue round trip — 10:00', note)
+            self.assertEqual(note.count(recap_manager.START), 1)
+            self.assertEqual(note.count(recap_manager.END), 1)
+
+    def test_six_concurrent_appends_lose_nothing_and_leave_vault_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            script = str(Path(recap_manager.__file__).resolve())
+            ctx = multiprocessing.get_context('fork')
+            processes = [
+                ctx.Process(target=run_append_process, args=(script, str(config_path), i))
+                for i in range(6)
+            ]
+
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(30)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(process.exitcode, 0)
+
+            note_path = root / 'vault' / 'daily' / '2026' / '08' / '2026-08-10.md'
+            note = note_path.read_text()
+            verify = subprocess.run(
+                [
+                    sys.executable,
+                    script,
+                    'verify-note',
+                    '--config',
+                    str(config_path),
+                    '--path',
+                    'daily/2026/08/2026-08-10.md',
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            verification = json.loads(verify.stdout)
+            with contextlib.closing(recap_manager.queue_connect(config)) as conn:
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM entry_queue WHERE status = 'pending'"
+                ).fetchone()[0]
+
+            self.assertEqual(note.count('#### Concurrent item '), 6)
+            self.assertEqual(note.count(recap_manager.START), 1)
+            self.assertEqual(note.count(recap_manager.END), 1)
+            self.assertTrue(verification['word_count_ok'])
+            self.assertTrue(verification['summary_markers_ok'])
+            self.assertEqual(pending, 0)
+            vault_files = [path.name for path in (root / 'vault').rglob('*') if path.is_file()]
+            self.assertFalse(any(name.endswith(('.lock', '.db', '.db-wal', '.db-shm')) for name in vault_files))
+
+    def test_killed_flush_is_recovered_by_the_next_flush(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            payload = {
+                'title': 'Crash recovery',
+                'problem': '',
+                'solution': 'Replay the pending row.',
+                'conclusion': 'The entry is recovered.',
+                'key_points': 'Pending is durable.',
+                'links': '',
+                'tags': '',
+                'time': '11:00',
+                'work_items': '',
+            }
+            recap_manager.enqueue_entry(config, dt.date(2026, 8, 10), payload)
+            ctx = multiprocessing.get_context('fork')
+            process = ctx.Process(target=crash_during_flush, args=(config,))
+
+            process.start()
+            process.join(30)
+            self.assertEqual(process.exitcode, -signal.SIGKILL)
+            with contextlib.closing(recap_manager.queue_connect(config)) as conn:
+                pending_before = conn.execute(
+                    "SELECT COUNT(*) FROM entry_queue WHERE status = 'pending'"
+                ).fetchone()[0]
+
+            result = recap_manager.flush_pending(config)
+            note = (root / 'vault' / 'daily' / '2026' / '08' / '2026-08-10.md').read_text()
+
+            self.assertEqual(pending_before, 1)
+            self.assertEqual(result['remaining'], 0)
+            self.assertIn('#### Crash recovery — 11:00', note)
+
+    def test_work_items_render_across_entry_daily_and_weekly_and_resolve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            source = root / 'vault' / 'docs' / 'real-work-items.md'
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                '### RECAP-CORE-26810-1 — Queue rollout\n\n'
+                'The implementation is accepted. ^recap-core-26810-1\n'
+            )
+            link = '[[docs/real-work-items#^recap-core-26810-1|RECAP-CORE-26810-1]]'
+            bare_id = 'RECAP-CORE-26810-2'
+            script = str(Path(recap_manager.__file__).resolve())
+            base_cmd = [sys.executable, script]
+
+            subprocess.run(
+                base_cmd + [
+                    'append-entry', '--config', str(config_path), '--date', '2026-08-10',
+                    '--time', '12:00', '--title', 'Work item links', '--solution', 'Pass links through.',
+                    '--conclusion', 'All three recap layers retain them.', '--key-points', 'Never invent targets.',
+                    '--work-items', f'{link},{bare_id}',
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                base_cmd + ['refresh-daily-auto', '--config', str(config_path), '--date', '2026-08-10'],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                base_cmd + [
+                    'generate-weekly-auto', '--config', str(config_path),
+                    '--mode', 'current', '--date', '2026-08-10',
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+            daily = (root / 'vault' / 'daily' / '2026' / '08' / '2026-08-10.md').read_text()
+            weekly = (root / 'vault' / 'weekly' / '2026' / '08' / '2026-08-16.md').read_text()
+            target, anchor = link[2:-2].split('|', 1)[0].split('#^', 1)
+            target_path = root / 'vault' / f'{target}.md'
+
+            self.assertGreaterEqual(daily.count(link), 2)
+            self.assertIn('- 相关工作项：' + link, weekly)
+            self.assertIn(f'`{bare_id}`', daily)
+            self.assertIn(f'`{bare_id}`', weekly)
+            self.assertTrue(target_path.exists())
+            self.assertIn(f'^{anchor}', target_path.read_text())
+
+    def test_empty_work_items_keeps_legacy_bytes(self):
+        class Args:
+            time = '09:00'
+            title = '兼容性检查'
+            problem = ''
+            solution = '保持原输出。'
+            conclusion = '兼容完成。'
+            key_points = '不增加空字段。'
+            links = ''
+            tags = 'compat'
+            work_items = ''
+
+        entry = recap_manager.build_entry_block(Args)
+        expected_entry = (
+            '#### 兼容性检查 — 09:00\n\n'
+            '- **结果**: 兼容完成。\n'
+            '- **处理**: 保持原输出。\n'
+            '- **要点**: 不增加空字段\n'
+            '- **文档**: 无\n'
+            '- **标签**: #compat\n'
+        )
+        self.assertEqual(entry, expected_entry)
+
+        daily = recap_manager.build_daily_summary_from_note(entry)
+        expected_daily = (
+            '## 今日总结\n\n### 今日重点\n'
+            '1. **兼容性检查**：兼容完成。\n\n'
+            '### 关键判断\n- 不增加空字段\n\n'
+            '### 文档与标签\n- 文档：无\n- 标签：#compat'
+        )
+        self.assertEqual(daily, expected_daily)
+
+        items = {
+            'compat': {
+                'title': '兼容性检查', 'dates': ['2026-08-10'], 'problems': [],
+                'key_points': ['不增加空字段'], 'conclusions': ['兼容完成。'],
+                'links': [], 'tags': ['compat'],
+            }
+        }
+        weekly_body = (
+            '# 周报 - 2026-08-16\n\n'
+            '<!-- AI_SUMMARY_START -->\n'
+            '## 本周重点事项（按复杂度 / 投入度排序）\n\n'
+            '### 1. 兼容性检查\n'
+            '- 涉及日期：2026-08-10\n'
+            '- 关键点：不增加空字段\n'
+            '- 结论/产出：兼容完成。\n'
+            '- 相关文档：无\n'
+            '- 标签：#compat\n\n'
+            '## 本周总体结论\n'
+            '- 本周主要推进了 兼容性检查\n'
+            '<!-- AI_SUMMARY_END -->\n'
+        )
+        expected_weekly = (
+            '---\n'
+            'type: weekly-summary\n'
+            'week_start: 2026-08-10\n'
+            'week_end: 2026-08-16\n'
+            f'word_count: {len(weekly_body)}\n'
+            'tags: [compat]\n'
+            '---\n'
+            + weekly_body
+        )
+        weekly = recap_manager.build_weekly_report(
+            dt.date(2026, 8, 10), dt.date(2026, 8, 16), items
+        )
+        self.assertEqual(weekly, expected_weekly)
+
+    def test_replace_summary_preserves_other_content_and_verifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            date = dt.date(2026, 8, 10)
+            path = recap_manager.daily_path(config, date)
+            original = recap_manager.normalize_daily_note(
+                '# 2026-08-10\n\n#### Existing entry — 08:00\n\n- **结果**: Keep me.\n',
+                date,
+            )
+            original = recap_manager.replace_summary_block(original, '## 今日总结\n\n旧总结')
+            original = recap_manager.normalize_daily_note(original, date)
+            recap_manager.write_note_direct(config, path, original)
+            replacement = root / 'replacement.md'
+            replacement.write_text('## 今日总结\n\n### 今日重点\n- 新总结')
+
+            class ReplaceArgs:
+                obsidian_bin = None
+                vault = None
+                vault_path = config['vault_path']
+                daily_dir = config['daily_dir']
+                weekly_dir = None
+                index_dir = None
+                queue_db = config['queue_db']
+                date = '2026-08-10'
+                file = str(replacement)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                recap_manager.cmd_replace_summary(ReplaceArgs)
+            updated = recap_manager.read_note_direct(config, path)
+            before_body = recap_manager.split_frontmatter(original)[1]
+            after_body = recap_manager.split_frontmatter(updated)[1]
+
+            class VerifyArgs:
+                obsidian_bin = '/missing/obsidian'
+                vault = 'TestVault'
+                vault_path = config['vault_path']
+                daily_dir = config['daily_dir']
+                weekly_dir = None
+                index_dir = None
+                queue_db = config['queue_db']
+                path = 'daily/2026/08/2026-08-10.md'
+                fix = False
+
+            verify_output = io.StringIO()
+            with contextlib.redirect_stdout(verify_output):
+                recap_manager.cmd_verify_note(VerifyArgs)
+            verification = json.loads(verify_output.getvalue())
+
+            self.assertEqual(
+                recap_manager.remove_generated_block(before_body),
+                recap_manager.remove_generated_block(after_body),
+            )
+            self.assertIn('### 今日重点\n- 新总结', updated)
+            self.assertEqual(updated.count(recap_manager.START), 1)
+            self.assertEqual(updated.count(recap_manager.END), 1)
+            meta, body = recap_manager.split_frontmatter(updated)
+            self.assertEqual(meta['word_count'], len(body))
+            self.assertTrue(verification['word_count_ok'])
+            self.assertTrue(verification['summary_markers_ok'])
+
+    def test_queue_path_rejects_vault_and_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            config['queue_db'] = str(root / 'vault' / 'queue.db')
+            with self.assertRaises(ValueError):
+                recap_manager.queue_db_path(config)
+
+            config['queue_db'] = str(Path(recap_manager.__file__).resolve().parent / 'queue.db')
+            with self.assertRaises(ValueError):
+                recap_manager.queue_db_path(config)
 
 
 if __name__ == "__main__":
