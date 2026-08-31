@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import List, Dict, Any
@@ -1047,6 +1048,129 @@ def build_entry_block(args) -> str:
     return '\n'.join(lines) + '\n'
 
 
+# Where each CLI keeps its per-session transcript. An entry's date must come from
+# when the work happened, not from when someone got around to summarizing it.
+CLAUDE_SESSION_ROOT = Path.home() / '.claude' / 'projects'
+CODEX_SESSION_ROOT = Path.home() / '.codex' / 'sessions'
+# Synthetic user turns both CLIs inject (system reminders, slash-command echoes,
+# plugin banners). They carry the summarize request's clock, never the work's.
+SYNTHETIC_TURN_PREFIXES = ('<', '/', '#', 'Caveat:', '<recommended_plugins>')
+
+
+def find_session_transcript(session_id: str) -> Path | None:
+    """Locate the transcript for a Claude session id or a Codex thread id."""
+    session_id = (session_id or '').strip()
+    if not session_id:
+        return None
+    claude = sorted(CLAUDE_SESSION_ROOT.glob(f'*/{session_id}.jsonl'))
+    if claude:
+        return claude[0]
+    codex = sorted(CODEX_SESSION_ROOT.glob(f'**/rollout-*-{session_id}.jsonl'))
+    if codex:
+        return codex[0]
+    return None
+
+
+def looks_like_real_user_turn(text: str) -> bool:
+    text = (text or '').strip()
+    if not text:
+        return False
+    return not text.startswith(SYNTHETIC_TURN_PREFIXES)
+
+
+def transcript_user_turn_timestamps(path: Path) -> List[str]:
+    """Every real user-turn timestamp in a transcript, oldest first."""
+    stamps: List[str] = []
+    try:
+        handle = path.open('r', encoding='utf-8', errors='replace')
+    except OSError:
+        return stamps
+    with handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            stamp = record.get('timestamp')
+            if not stamp:
+                continue
+            text = ''
+            if record.get('type') == 'user':
+                message = record.get('message')
+                if isinstance(message, dict) and isinstance(message.get('content'), str):
+                    text = message['content']
+            elif record.get('type') == 'response_item':
+                payload = record.get('payload') or {}
+                if payload.get('type') == 'message' and payload.get('role') == 'user':
+                    parts = payload.get('content')
+                    if isinstance(parts, list):
+                        text = ' '.join(
+                            str(part.get('text', ''))
+                            for part in parts
+                            if isinstance(part, dict)
+                        )
+            if looks_like_real_user_turn(text):
+                stamps.append(str(stamp))
+    return stamps
+
+
+def session_work_started_at(session_id: str) -> dt.datetime | None:
+    """Local datetime of a session's first real user turn.
+
+    That turn is when the work being summarized actually began. The last turn is
+    typically the "summarize this session" request itself, which is exactly the
+    clock that misfiles a recap into the wrong day.
+    """
+    path = find_session_transcript(session_id)
+    if path is None:
+        return None
+    stamps = transcript_user_turn_timestamps(path)
+    if not stamps:
+        return None
+    raw = stamps[0].replace('Z', '+00:00')
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone()
+
+
+def resolve_entry_datetime(args) -> tuple:
+    """Decide which day and time an entry belongs to.
+
+    Precedence is explicit > inferred > today, because an agent that knows the
+    real date must always win, and a batch of recaps written days later must not
+    silently land on the day someone typed "总结会话".
+    """
+    session_id = (getattr(args, 'cli_session', '') or '').strip()
+    started = session_work_started_at(session_id) if session_id else None
+    if args.date:
+        return parse_date(args.date), (args.time or dt.datetime.now().strftime('%H:%M')), 'explicit'
+    if started is not None:
+        return started.date(), (args.time or started.strftime('%H:%M')), 'session'
+    return dt.date.today(), (args.time or dt.datetime.now().strftime('%H:%M')), 'today'
+
+
+def warn_entry_date_source(source: str, date: dt.date, session_id: str) -> None:
+    if source == 'explicit':
+        return
+    if source == 'session':
+        print(
+            f'[recap] entry dated {date.isoformat()} from session {session_id} first user turn',
+            file=sys.stderr,
+        )
+        return
+    detail = f'session {session_id} has no readable transcript' if session_id else 'no --cli-session given'
+    print(
+        f'[recap] WARNING: no --date and {detail}; defaulting to today ({date.isoformat()}). '
+        'If this recap covers work from another day, rerun with --date/--time — '
+        'there is no command to move an entry afterwards.',
+        file=sys.stderr,
+    )
+
+
 def entry_payload_from_args(args) -> Dict[str, str]:
     return {
         'title': args.title,
@@ -1155,7 +1279,9 @@ def flush_pending(config: Dict[str, Any]) -> Dict[str, int]:
 
 def cmd_append_entry(args):
     config = load_config(args)
-    date = parse_date(args.date) if args.date else dt.date.today()
+    date, entry_time, source = resolve_entry_datetime(args)
+    args.time = entry_time
+    warn_entry_date_source(source, date, (getattr(args, 'cli_session', '') or '').strip())
     path = daily_path(config, date)
     entry_id = enqueue_entry(config, date, entry_payload_from_args(args))
     flush_pending(config)
@@ -1284,6 +1410,13 @@ def main():
     add_common_args(a)
     a.add_argument('--date')
     a.add_argument('--time')
+    a.add_argument(
+        '--cli-session',
+        default='',
+        help='Claude session id or Codex thread id. Without --date, the entry is '
+             'dated from this session first real user turn instead of today, so a '
+             'recap written days later still lands on the day the work happened.',
+    )
     a.add_argument('--title', required=True)
     a.add_argument(
         '--problem',

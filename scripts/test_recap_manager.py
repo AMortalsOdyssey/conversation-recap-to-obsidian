@@ -676,3 +676,127 @@ word_count: 1
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EntryDateResolutionTests(unittest.TestCase):
+    """An entry must be dated by when the work happened, not by when someone
+    typed 总结会话. A batch of recaps written days later used to land on the
+    summarizing day, which silently corrupts the weekly 涉及日期 field."""
+
+    class Args:
+        date = ''
+        time = ''
+        cli_session = ''
+
+    def _args(self, **overrides):
+        args = EntryDateResolutionTests.Args()
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def _claude_transcript(self, root: Path, session_id: str, records) -> None:
+        project = root / '.claude' / 'projects' / '-Users-tt-code-demo'
+        project.mkdir(parents=True, exist_ok=True)
+        with (project / f'{session_id}.jsonl').open('w', encoding='utf-8') as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    def _codex_rollout(self, root: Path, session_id: str, records) -> None:
+        day = root / '.codex' / 'sessions' / '2026' / '08' / '27'
+        day.mkdir(parents=True, exist_ok=True)
+        name = f'rollout-2026-08-27T02-56-39-{session_id}.jsonl'
+        with (day / name).open('w', encoding='utf-8') as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    @contextlib.contextmanager
+    def _home(self, root: Path):
+        original_claude = recap_manager.CLAUDE_SESSION_ROOT
+        original_codex = recap_manager.CODEX_SESSION_ROOT
+        recap_manager.CLAUDE_SESSION_ROOT = root / '.claude' / 'projects'
+        recap_manager.CODEX_SESSION_ROOT = root / '.codex' / 'sessions'
+        try:
+            yield
+        finally:
+            recap_manager.CLAUDE_SESSION_ROOT = original_claude
+            recap_manager.CODEX_SESSION_ROOT = original_codex
+
+    def test_claude_session_dates_the_entry_by_first_real_user_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._claude_transcript(root, 'sess-a', [
+                # Synthetic turns carry the wrong clock and must be skipped.
+                {'type': 'user', 'timestamp': '2026-08-26T18:00:00.000Z',
+                 'message': {'content': '<system-reminder>ignore me</system-reminder>'}},
+                {'type': 'user', 'timestamp': '2026-08-26T18:56:39.784Z',
+                 'message': {'content': '根据下面的方案，执行落地，部署测试环境'}},
+                # The summarize request days later must never win.
+                {'type': 'user', 'timestamp': '2026-08-31T02:38:37.308Z',
+                 'message': {'content': '总结会话'}},
+            ])
+            with self._home(root):
+                date, entry_time, source = recap_manager.resolve_entry_datetime(
+                    self._args(cli_session='sess-a'))
+
+        self.assertEqual(source, 'session')
+        self.assertEqual(date, dt.date(2026, 8, 27))
+        self.assertEqual(entry_time, '02:56')
+
+    def test_codex_rollout_shape_is_understood_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._codex_rollout(root, 'thread-b', [
+                {'type': 'session_meta', 'timestamp': '2026-08-27T02:56:00.000Z', 'payload': {}},
+                {'type': 'response_item', 'timestamp': '2026-08-26T18:56:39.000Z',
+                 'payload': {'type': 'message', 'role': 'user',
+                             'content': [{'type': 'input_text', 'text': '把这批改动落地'}]}},
+            ])
+            with self._home(root):
+                date, _, source = recap_manager.resolve_entry_datetime(
+                    self._args(cli_session='thread-b'))
+
+        self.assertEqual(source, 'session')
+        self.assertEqual(date, dt.date(2026, 8, 27))
+
+    def test_explicit_date_always_beats_the_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._claude_transcript(root, 'sess-c', [
+                {'type': 'user', 'timestamp': '2026-08-26T18:56:39.784Z',
+                 'message': {'content': '真实用户轮'}},
+            ])
+            with self._home(root):
+                date, entry_time, source = recap_manager.resolve_entry_datetime(
+                    self._args(date='2026-08-28', time='17:07', cli_session='sess-c'))
+
+        self.assertEqual(source, 'explicit')
+        self.assertEqual(date, dt.date(2026, 8, 28))
+        self.assertEqual(entry_time, '17:07')
+
+    def test_missing_date_and_session_warns_loudly_instead_of_defaulting_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._home(Path(tmp)):
+                date, _, source = recap_manager.resolve_entry_datetime(self._args())
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    recap_manager.warn_entry_date_source(source, date, '')
+
+        self.assertEqual(source, 'today')
+        self.assertEqual(date, dt.date.today())
+        message = stderr.getvalue()
+        self.assertIn('WARNING', message)
+        # The warning has to say the entry cannot be moved afterwards; there is no
+        # move/remove command, so a silent default is unrecoverable.
+        self.assertIn('no command to move an entry', message)
+
+    def test_unreadable_session_falls_back_to_today_with_the_session_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._home(Path(tmp)):
+                date, _, source = recap_manager.resolve_entry_datetime(
+                    self._args(cli_session='does-not-exist'))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    recap_manager.warn_entry_date_source(source, date, 'does-not-exist')
+
+        self.assertEqual(source, 'today')
+        self.assertIn('does-not-exist', stderr.getvalue())
