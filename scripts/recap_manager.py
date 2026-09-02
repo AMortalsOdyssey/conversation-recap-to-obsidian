@@ -859,6 +859,7 @@ def build_weekly_report(week_start: dt.date, week_end: dt.date, items: Dict[str,
     return render_note(meta, body)
 
 
+MONTHLY_ALIGNMENT_HEADING = '## 与上月计划的对齐'
 MONTHLY_REQUIRED_HEADINGS = [
     '## 本月目标',
     '## 本月目标完成情况',
@@ -1028,6 +1029,8 @@ def monthly_note_checks(config: Dict[str, Any], meta: Dict[str, Any], body: str,
     result: Dict[str, Any] = {
         'required_headings_ok': not missing,
         'missing_headings': missing,
+        # Private plan-versus-reality note; expected whenever a previous month's review exists.
+        'has_alignment_section': bool(re.search(rf'^{re.escape(MONTHLY_ALIGNMENT_HEADING)}', body, flags=re.M)),
         'no_summary_markers_ok': START not in text and END not in text,
     }
     try:

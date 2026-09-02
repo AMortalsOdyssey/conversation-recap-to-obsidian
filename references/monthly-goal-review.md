@@ -17,7 +17,7 @@ The split of labour is fixed: **the script counts, the reviewer judges.** `inven
 ## 1. Establish scope and inventory the source
 
 1. Resolve the reporting month, the project or goal, the form headings, and the destination from the user request and any screenshot. Without a screenshot, use the default headings in section 3.
-2. Read the previous month's review if one exists. Its `下月重点动作` is the baseline for this month's `本月目标`; carry every item forward as achieved, partially achieved, or dropped with a reason. Never let a goal silently disappear between months.
+2. Read the previous month's review if one exists and keep its `下月重点动作` at hand. It feeds the private alignment section (section 3), **not** this month's `本月目标`. Never let a planned item silently disappear between months.
 3. Build the ledger with the script, writing it **outside the vault** (the scratchpad or a temp dir):
 
    ```bash
@@ -46,14 +46,35 @@ The split of labour is fixed: **the script counts, the reviewer judges.** `inven
 
 - Merge the same initiative across dates. Do not organize the review as a chronological diary.
 - Rank workstreams by user/player value, importance of the solved problem, delivery maturity, duration, and decision weight.
-- Use the user's stated goal when available; otherwise inherit last month's `下月重点动作`. If the goal must still be inferred, express it as `玩家/用户价值 → 核心问题 → 具体目标` and mark it as an evidence-based synthesis rather than a historical quote.
+- `本月目标` describes what the month actually pursued. Use the user's stated goal when one was given for the month; otherwise synthesize it from the ledger as `玩家/用户价值 → 核心问题 → 具体目标` and say so. Do not copy last month's plan into it: the plan and the reality are compared separately in the alignment section.
 - Choose an honest completion label: `已达成`, `阶段性达成`, `推进中`, or `未启动`. Use a percentage only when a defined denominator or agreed milestone plan makes the number defensible.
 - Keep these states separate: code implemented, automated tests passed, test environment deployed, real-device/business acceptance passed, client release merged, production impact measured.
 - Never convert a test deployment into player impact. Never convert a target, plan, or pending acceptance into a completed result.
 - Preserve quantitative baselines, targets, and measured outcomes. State explicitly when a target still lacks a comparable post-change measurement.
 - A measurement belongs to the month it was taken. Results measured after `period_end` may appear only as `月后补充（YYYY-MM-DD）`; the month in which they were measured owns them and reports them as its own progress. This is what keeps two consecutive reviews from claiming the same number.
 
-## 3. Produce the review form first
+## 3. Produce the alignment note, then the review form
+
+### 与上月计划的对齐（自留，不进表单）
+
+When a previous month's review exists, write this section **first in the body, above the form**. It is for the user alone and is never pasted anywhere, so it can be blunt. Its job is to compare plan against reality without letting either contaminate the other:
+
+```markdown
+## 与上月计划的对齐（自留，不进表单）
+
+| 上月规划的动作 | 本月实际做了什么 | 对齐判断 |
+|---|---|---|
+
+**计划外但占了大量精力**：…
+
+**对齐总评**：…
+```
+
+- One row per planned action, quoted with its original metrics. The middle column cites dated ledger facts; the last column is one of `达成` / `部分对齐` / `未启动` / `偏离`, followed by one clause on how (means changed, target unjudged, superseded).
+- List unplanned work that consumed real effort, and say whether it was a product insert, an incident, or a precondition of a planned item.
+- End with an overall verdict: counts per label, the one or two reasons for the deviation, and any item that has slipped two months in a row.
+
+### The form
 
 When the user supplies form headings, reproduce them exactly. Otherwise use this default order:
 
@@ -75,8 +96,8 @@ Write the first four sections so the user can paste them directly into a perform
 
 - Lead with player/user value.
 - State the core problem being solved.
-- End with concrete, verifiable goals, and say where they came from (last month's actions, a stated plan, or synthesis).
-- Avoid turning the goal into a list of technical tasks discovered after the fact.
+- Name the goals the month actually pursued, synthesized from the ledger, and say that they were derived from the month's work; point to the alignment section for the plan-versus-reality comparison.
+- Keep it at the level of outcomes the month was after, not a list of technical tasks; but never restate last month's plan as if it had been this month's goal.
 
 ### 本月目标完成情况
 
@@ -84,7 +105,7 @@ Write the first four sections so the user can paste them directly into a perform
 - Group progress into 3–6 cross-day workstreams.
 - For each workstream, name the durable result or output and its strongest delivery evidence.
 - Distinguish completed work from testing-only, pending acceptance, and planned follow-up.
-- Close with the fate of every carried-forward goal: achieved, partially achieved, or dropped with the reason.
+- Do not repeat the plan-versus-reality accounting here; it lives in the alignment section.
 
 ### 解决效果
 
@@ -129,6 +150,7 @@ Add only the evidence surfaces that help review and correction:
 4. Do not modify source Daily Notes while creating or refreshing the monthly review.
 5. Run `verify-note --path <note> --fix`. For a `monthly-goal-review` note it reports, beyond `word_count` and markers:
    - `required_headings_ok` / `missing_headings`: the five form headings;
+   - `has_alignment_section`: whether `## 与上月计划的对齐` is present (expected whenever a previous month's review exists);
    - `source_daily_notes_ok` / `actual_source_daily_notes`: recounted from the vault, corrected by `--fix`;
    - `no_summary_markers_ok`;
    - `post_period_dates`: every ISO date in the body later than `period_end`. Each one must sit inside a `月后补充（…）` phrase; otherwise move the fact to the month that owns it.
@@ -140,7 +162,7 @@ A human-reviewed monthly note is authoritative. On refresh, preserve user correc
 
 Every partial edit ends with the same consistency sweep, because a fact added to one section is usually contradicted by four others:
 
-1. the `总体判断` callout at the top;
+1. the `总体判断` callout at the top and the alignment section's verdict, if the fact changes either;
 2. the matching workstream bullet under `本月目标完成情况`, including its `未完成边界` line;
 3. `解决效果` and `下月重点动作`, if the new fact changes what is proven or what is next;
 4. the matching row of the `事实依据与进展归并` table;
@@ -157,5 +179,6 @@ A strong monthly review lets a manager understand, without reading the diary:
 - the most important real progress and durable outputs;
 - what changed because of the work;
 - what is genuinely complete versus still awaiting acceptance or measurement;
-- what next month should close, and what last month asked for that did or did not happen;
+- what next month should close;
+- separately, for the user's own eyes, what last month asked for and what actually happened to each item;
 - exactly which cross-team support is needed.

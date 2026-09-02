@@ -941,6 +941,7 @@ class MonthlyReviewTests(unittest.TestCase):
             result = json.loads(buf.getvalue())
             self.assertFalse(result['required_headings_ok'])
             self.assertEqual(result['missing_headings'], ['## 需要协同支持的事项'])
+            self.assertFalse(result['has_alignment_section'])
             self.assertTrue(result['no_summary_markers_ok'])
             self.assertEqual(result['actual_source_daily_notes'], 3)
             self.assertTrue(result['source_daily_notes_ok'], 'fix must correct the count to what is actually on disk')
