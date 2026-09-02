@@ -1,11 +1,11 @@
 ---
 name: conversation-recap-to-obsidian
-description: Use when summarizing chats or existing Obsidian daily/weekly notes into review-ready entries, daily summaries, weekly reports, session recaps, work-item groupings, wikilinks, tags, conclusions, key points, Obsidian Bases indexes, or concise project-grouped weekly briefs for sharing in a team chat. Also use when the user says “总结会话”, “总结上周周报”, “可发群版本”, asks to refresh Daily Note/weekly notes, or asks to improve the recap/weekly workflow.
+description: Use when summarizing chats or existing Obsidian daily, weekly, or monthly notes into review-ready entries, daily summaries, weekly reports, monthly goal reviews, session recaps, work-item groupings, wikilinks, tags, conclusions, key points, Obsidian Bases indexes, or concise project-grouped briefs. Also use when the user says “总结会话”, “总结上周周报”, “月度 review”, “本月目标”, “可发群版本”, asks to refresh Daily Note/weekly notes, or asks to improve the recap workflow.
 ---
 
 # Conversation Recap to Obsidian
 
-This skill turns raw conversation or existing Obsidian markdown into **review-ready notes**, not generic summaries. Treat the whole daily/weekly note as input content regardless of who wrote each part.
+This skill turns raw conversation or existing Obsidian markdown into **review-ready notes**, not generic summaries. Treat the whole source note as input content regardless of who wrote each part.
 
 The default goal is to help the user answer:
 - What were the main things done?
@@ -21,6 +21,7 @@ The default goal is to help the user answer:
 - regenerating a daily summary by reading the full daily note first
 - creating a weekly report from multiple daily notes
 - creating a weekly report in Obsidian and then outputting a concise group-sendable summary
+- creating a monthly goal review from every Daily Note in the reporting month
 - merging a multi-day thread into one weekly module
 - replacing stale generated summary blocks while preserving all non-target content
 - producing Obsidian wikilinks for relevant artifacts
@@ -28,7 +29,7 @@ The default goal is to help the user answer:
 
 ## Core design
 
-Split the work in three layers:
+Split the work in five layers:
 
 1. **Entry layer = raw work-item capture**
    - append a single session recap into the daily note
@@ -45,7 +46,13 @@ Split the work in three layers:
    - rank larger / more complex items first
    - avoid day-by-day流水账
 
-4. **Verification and review layer = durable Obsidian writeback**
+4. **Monthly goal-review layer = outcome and value synthesis**
+   - inventory every Daily Note in the reporting month
+   - merge cross-day work into goal-level workstreams
+   - separate implementation, testing, deployment, acceptance, release, and production impact
+   - map progress to player/user value, completion status, next actions, and collaboration needs
+
+5. **Verification and review layer = durable Obsidian writeback**
    - reread saved notes after writing
    - verify `word_count` against the actual body character count
    - keep generated summary markers balanced
@@ -259,6 +266,18 @@ Writing guidance:
 - The command reports overflow as `另有 N 项…` rather than dropping it. Decide what each such line becomes: expand it into the real items when they carry weight, or fold it into the sibling categories when it does not. The only hard rule is that the work cannot disappear — a brief sent to a group chat must not quietly lose a workstream.
 - In the final reply, include the group-sendable block and briefly mention the Obsidian weekly note path.
 
+## Mode 4: Monthly goal review mode
+
+Use this mode when the user asks for a monthly review, monthly goal recap, performance-review input, or a synthesis of one month of Daily Notes.
+
+Before working, read [`references/monthly-goal-review.md`](references/monthly-goal-review.md) completely and follow its evidence, synthesis, output, and writeback rules.
+
+Treat monthly review as a high-judgment synthesis, not as a larger weekly report or a mechanical script output. Read every existing Daily Note in the target month, filter to the requested project or goal, merge work by cross-day workstream, and preserve exact evidence boundaries. When the user supplies form headings or a screenshot, reproduce those headings exactly and place the directly pasteable review content first.
+
+Use the user's requested destination. Otherwise reuse an existing monthly-review directory in the vault; if none exists, create `monthly-reviews/YYYY/MM/`. Do not modify source Daily Notes while generating a monthly review.
+
+After writing, run `scripts/recap_manager.py verify-note --path <monthly-note-path> --fix`, reread the saved note, and confirm the source-note count, required headings, completion boundaries, and `word_count`.
+
 ## Tagging guidance
 
 Tags are optional but useful.
@@ -281,7 +300,7 @@ Tags are optional but useful.
 
 ## Safe rewrite rule
 
-Generated sections should be wrapped with markers so they can be replaced safely:
+Generated daily and weekly summary sections should be wrapped with markers so they can be replaced safely. Monthly goal reviews follow Mode 4's human-review rules and must not wrap the whole note in these markers.
 
 ```markdown
 <!-- AI_SUMMARY_START -->
