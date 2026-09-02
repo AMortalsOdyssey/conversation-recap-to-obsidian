@@ -270,13 +270,13 @@ Writing guidance:
 
 Use this mode when the user asks for a monthly review, monthly goal recap, performance-review input, or a synthesis of one month of Daily Notes.
 
-Before working, read [`references/monthly-goal-review.md`](references/monthly-goal-review.md) completely and follow its evidence, synthesis, output, and writeback rules.
+Before working, read [`references/monthly-goal-review.md`](references/monthly-goal-review.md) completely and follow its evidence, synthesis, output, writeback, and refresh rules.
 
-Treat monthly review as a high-judgment synthesis, not as a larger weekly report or a mechanical script output. Read every existing Daily Note in the target month, filter to the requested project or goal, merge work by cross-day workstream, and preserve exact evidence boundaries. When the user supplies form headings or a screenshot, reproduce those headings exactly and place the directly pasteable review content first.
+The script counts, the reviewer judges. Start with `scripts/recap_manager.py inventory-month --month YYYY-MM --tags … --work-item-prefixes … --keywords … --project … --out <file outside the vault>`: it reads every Daily Note of the month once, proves the coverage count, drops the generated 今日总结 blocks, splits entries into in-scope and excluded, and prints the note path under the configured `monthly_dir`. Read the excluded list first and fix the scope by rerunning, then read the `--brief` ledger end to end to form cross-day workstreams, and open the full ledger or a raw Daily Note only where a delivery or acceptance boundary is still unclear.
 
-Use the user's requested destination. Otherwise reuse an existing monthly-review directory in the vault; if none exists, create `monthly-reviews/YYYY/MM/`. Do not modify source Daily Notes while generating a monthly review.
+Treat monthly review as a high-judgment synthesis, not as a larger weekly report or a mechanical script output. Inherit last month's `下月重点动作` as this month's goal baseline and account for every item. Keep code, automated tests, testing deployment, real-device acceptance, release merge, and production impact separate. A result measured after the period ends is `月后补充（YYYY-MM-DD）` and belongs to the month that measured it. When the user supplies form headings or a screenshot, reproduce those headings exactly and place the directly pasteable review content first.
 
-After writing, run `scripts/recap_manager.py verify-note --path <monthly-note-path> --fix`, reread the saved note, and confirm the source-note count, required headings, completion boundaries, and `word_count`.
+Do not modify source Daily Notes while generating a monthly review. After writing, run `scripts/recap_manager.py verify-note --path <monthly-note-path> --fix`, which for `type: monthly-goal-review` also checks the five form headings, recounts `source_daily_notes` from the vault, rejects `AI_SUMMARY` markers, and lists every date later than `period_end`; then reread the saved note. When refreshing an existing review, follow the consistency sweep in the reference instead of regenerating.
 
 ## Tagging guidance
 

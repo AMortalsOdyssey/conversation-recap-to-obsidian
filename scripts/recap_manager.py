@@ -21,6 +21,8 @@ DEFAULTS = {
     "vault_path": "",
     "daily_dir": "Memory/daily",
     "weekly_dir": "Memory/weekly",
+    "monthly_dir": "Memory/monthly",
+    "monthly_note_suffix": "个人目标月度Review",
     "index_dir": "Memory/index",
     "queue_db": "",
 }
@@ -46,7 +48,7 @@ def load_config(cli_args: argparse.Namespace) -> Dict[str, Any]:
                 config.update({k: v for k, v in file_cfg.items() if v not in (None, '')})
         except Exception:
             pass
-    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir', 'index_dir', 'queue_db'):
+    for key in ('obsidian_bin', 'vault', 'vault_path', 'daily_dir', 'weekly_dir', 'monthly_dir', 'index_dir', 'queue_db'):
         val = getattr(cli_args, key, None)
         if val:
             config[key] = val
@@ -192,12 +194,17 @@ def is_missing_note_error(error: Exception) -> bool:
 
 def read_note(config: Dict[str, Any], path: str) -> str:
     fs_path = note_fs_path(config, path)
+    # Exact bytes first. Round-tripping long CJK notes through the Obsidian CLI was seen
+    # (2026-09-02) to turn single characters into U+FFFD runs that grew on every pass; the
+    # CLI stays as the fallback for vaults whose path cannot be resolved.
+    if fs_path is not None and fs_path.exists():
+        return strip_known_cli_noise(fs_path.read_text(encoding='utf-8'))
     if has_obsidian_cli(config):
         try:
             return strip_known_cli_noise(run_obsidian(config, [f"vault={config['vault']}", 'read', f'path={path}']))
         except Exception as exc:
             if fs_path is not None and fs_path.exists():
-                return strip_known_cli_noise(fs_path.read_text())
+                return strip_known_cli_noise(fs_path.read_text(encoding='utf-8'))
             if is_missing_note_error(exc):
                 raise FileNotFoundError(path)
             if fs_path is not None:
@@ -205,13 +212,17 @@ def read_note(config: Dict[str, Any], path: str) -> str:
             raise
     if fs_path is not None:
         if fs_path.exists():
-            return strip_known_cli_noise(fs_path.read_text())
+            return strip_known_cli_noise(fs_path.read_text(encoding='utf-8'))
         raise FileNotFoundError(path)
     raise RuntimeError(f"obsidian CLI unavailable and vault path is unresolved for {path}")
 
 
 def create_or_overwrite_note(config: Dict[str, Any], path: str, content: str) -> None:
     fs_path = note_fs_path(config, path)
+    if fs_path is not None:
+        fs_path.parent.mkdir(parents=True, exist_ok=True)
+        fs_path.write_text(content, encoding='utf-8')
+        return
     if has_obsidian_cli(config):
         try:
             run_obsidian(config, [f"vault={config['vault']}", 'create', f'path={path}', f'content={content}', 'overwrite'])
@@ -221,7 +232,7 @@ def create_or_overwrite_note(config: Dict[str, Any], path: str, content: str) ->
                 raise
     if fs_path is not None:
         fs_path.parent.mkdir(parents=True, exist_ok=True)
-        fs_path.write_text(content)
+        fs_path.write_text(content, encoding='utf-8')
         return
     raise RuntimeError(f"obsidian CLI unavailable and vault path is unresolved for {path}")
 
@@ -232,7 +243,7 @@ def read_note_direct(config: Dict[str, Any], path: str) -> str:
         raise RuntimeError(f"vault path is unresolved for direct read: {path}")
     if not fs_path.exists():
         raise FileNotFoundError(path)
-    return strip_known_cli_noise(fs_path.read_text())
+    return strip_known_cli_noise(fs_path.read_text(encoding='utf-8'))
 
 
 def write_note_direct(config: Dict[str, Any], path: str, content: str) -> None:
@@ -240,7 +251,7 @@ def write_note_direct(config: Dict[str, Any], path: str, content: str) -> None:
     if fs_path is None:
         raise RuntimeError(f"vault path is unresolved for direct write: {path}")
     fs_path.parent.mkdir(parents=True, exist_ok=True)
-    fs_path.write_text(content)
+    fs_path.write_text(content, encoding='utf-8')
 
 
 def append_note(config: Dict[str, Any], path: str, content: str) -> None:
@@ -288,11 +299,21 @@ def split_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
         return {}, text
 
     meta: Dict[str, Any] = {}
+    last_key = None
     for line in m.group(1).splitlines():
+        # YAML block list continuation (`tags:` followed by `  - item` lines). Losing these
+        # on a rewrite silently strips a reviewed note's tags, so fold them into the list.
+        item = re.match(r'^\s+-\s+(.*)$', line)
+        if item and last_key is not None and meta.get(last_key) in ('', None) or (item and isinstance(meta.get(last_key), list)):
+            if not isinstance(meta.get(last_key), list):
+                meta[last_key] = []
+            meta[last_key].append(item.group(1).strip().strip('"').strip("'"))
+            continue
         if ':' not in line:
             continue
         key, raw = line.split(':', 1)
         key = key.strip()
+        last_key = key
         value = raw.strip()
         if value.startswith('[') and value.endswith(']'):
             inner = value[1:-1].strip()
@@ -315,7 +336,7 @@ def format_frontmatter_value(value: Any) -> str:
 
 
 def render_note(meta: Dict[str, Any], body: str) -> str:
-    ordered_keys = ['title', 'date', 'created', 'type', 'week_start', 'week_end', 'author', 'word_count', 'tags']
+    ordered_keys = ['title', 'date', 'updated', 'created', 'type', 'week_start', 'week_end', 'period_start', 'period_end', 'project', 'status', 'source_daily_notes', 'author', 'word_count', 'tags']
     lines = ['---']
     emitted = set()
     for key in ordered_keys:
@@ -419,12 +440,37 @@ def weekly_path(config: Dict[str, Any], sunday: dt.date) -> str:
     return f"{base}/{sunday.year}/{sunday.month:02d}/{sunday.isoformat()}.md"
 
 
+def parse_month(s: str) -> tuple[int, int]:
+    m = re.fullmatch(r'(\d{4})-(\d{1,2})', (s or '').strip())
+    if not m:
+        raise ValueError(f'month must look like YYYY-MM, got {s!r}')
+    year, month = int(m.group(1)), int(m.group(2))
+    if not 1 <= month <= 12:
+        raise ValueError(f'month out of range: {s!r}')
+    return year, month
+
+
+def month_bounds(year: int, month: int) -> tuple[dt.date, dt.date]:
+    start = dt.date(year, month, 1)
+    end = dt.date(year + (month == 12), (month % 12) + 1, 1) - dt.timedelta(days=1)
+    return start, end
+
+
+def monthly_path(config: Dict[str, Any], year: int, month: int, project: str = '') -> str:
+    base = config['monthly_dir'].rstrip('/')
+    suffix = config.get('monthly_note_suffix') or DEFAULTS['monthly_note_suffix']
+    stem = f"{year}-{month:02d}_{project}{suffix}" if project else f"{year}-{month:02d}_{suffix}"
+    return f"{base}/{year}/{month:02d}/{stem}.md"
+
+
 def base_index_path(config: Dict[str, Any], kind: str) -> str:
     base = config['index_dir'].rstrip('/')
     if kind == 'daily':
         return f"{base}/Daily Notes.base"
     if kind == 'weekly':
         return f"{base}/Weekly Reports.base"
+    if kind == 'monthly':
+        return f"{base}/Monthly Reviews.base"
     raise ValueError(f"unknown base kind: {kind}")
 
 
@@ -813,6 +859,192 @@ def build_weekly_report(week_start: dt.date, week_end: dt.date, items: Dict[str,
     return render_note(meta, body)
 
 
+MONTHLY_REQUIRED_HEADINGS = [
+    '## 本月目标',
+    '## 本月目标完成情况',
+    '## 解决效果',
+    '## 下月重点动作',
+    '## 需要协同支持的事项',
+]
+ISO_DATE_RE = re.compile(r'(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)')
+
+
+def section_time(raw_title: str) -> str:
+    m = re.search(r'\s+[—-]\s+(\d{1,2}:\d{2})$', raw_title.strip())
+    return m.group(1) if m else ''
+
+
+def gather_month_entries(config: Dict[str, Any], year: int, month: int) -> Dict[str, Any]:
+    """Read every Daily Note of one month once and flatten the structured entries.
+
+    The generated 今日总结 block is dropped by extract_sections, so the ledger only
+    carries what the sessions themselves recorded. Nothing here judges relevance;
+    scope filtering happens in scope_month_entries so the excluded side stays visible.
+    """
+    start, end = month_bounds(year, month)
+    notes: List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []
+    day = start
+    while day <= end:
+        path = daily_path(config, day)
+        try:
+            text = read_note(config, path)
+        except Exception:
+            day += dt.timedelta(days=1)
+            continue
+        body = remove_generated_block(strip_frontmatter(text))
+        raw_titles = [re.sub(r'^####\s+', '', line.strip()) for line in body.splitlines() if re.match(r'^####\s+', line.strip())]
+        sections = extract_sections(text)
+        for idx, sec in enumerate(sections):
+            fields = parse_structured_fields(sec['body'])
+            raw = raw_titles[idx] if idx < len(raw_titles) else sec['title']
+            tags = uniq_keep_order(parse_tags_text(fields.get('tags', '')) + parse_tags_text(sec['body']))
+            entries.append({
+                'date': day.isoformat(),
+                'time': section_time(raw),
+                'title': sec['title'],
+                'problem': fields['problem'],
+                'solution': fields['solution'],
+                'conclusion': fields['conclusion'],
+                'key_points': fields['key_points'],
+                'links': uniq_keep_order(extract_wikilinks(fields.get('links', '')) + extract_inline_paths(fields.get('links', ''))),
+                'work_items': uniq_keep_order(parse_rendered_work_items(fields.get('work_items', ''))),
+                'tags': tags,
+            })
+        notes.append({'date': day.isoformat(), 'path': path, 'entries': len(sections), 'has_generated_summary': START in text})
+        day += dt.timedelta(days=1)
+    return {'year': year, 'month': month, 'period_start': start.isoformat(), 'period_end': end.isoformat(), 'notes': notes, 'entries': entries}
+
+
+def work_item_display(item: str) -> str:
+    """`[[doc#^anchor|CC-BKLT-26810-1]]` and `` `CC-BKLT-26810-1` `` both mean the bare ID."""
+    text = (item or '').strip().strip('`').strip()
+    m = re.fullmatch(r'\[\[(?:[^\]|]*)\|([^\]]+)\]\]', text)
+    if m:
+        return m.group(1).strip()
+    m = re.fullmatch(r'\[\[([^\]|#]*)(?:#[^\]|]*)?\]\]', text)
+    if m:
+        return m.group(1).strip().split('/')[-1]
+    return text
+
+
+def work_item_prefix(item: str) -> str:
+    m = re.match(r'^([A-Za-z]{2,6})-', work_item_display(item))
+    return m.group(1).upper() if m else ''
+
+
+def scope_month_entries(entries: List[Dict[str, Any]], tags: List[str], prefixes: List[str], keywords: List[str]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split entries into in-scope and excluded. No rule at all means everything is in scope."""
+    want_tags = {t.strip().lstrip('#').lower() for t in tags if t.strip()}
+    want_prefixes = {p.strip().upper() for p in prefixes if p.strip()}
+    want_keywords = [k.strip().lower() for k in keywords if k.strip()]
+    if not (want_tags or want_prefixes or want_keywords):
+        return list(entries), []
+    included, excluded = [], []
+    for e in entries:
+        entry_tags = {t.lstrip('#').lower() for t in e['tags']}
+        # `创角` should also catch `创角agent` and `创角/性能`: a wanted tag matches any entry tag it prefixes.
+        hit = (
+            any(et == wt or et.startswith(wt) for et in entry_tags for wt in want_tags)
+            or any(work_item_prefix(w) in want_prefixes for w in e['work_items'])
+            or any(k in e['title'].lower() for k in want_keywords)
+        )
+        (included if hit else excluded).append(e)
+    return included, excluded
+
+
+def build_month_ledger(inv: Dict[str, Any], included: List[Dict[str, Any]], excluded: List[Dict[str, Any]], scope_desc: str, brief: bool = False) -> str:
+    """Render the private evidence ledger. This is working material, never a vault note."""
+    notes = inv['notes']
+    lines = [f"# {inv['year']}-{inv['month']:02d} 月度证据台账", '']
+    lines.append(f"- 结算期：{inv['period_start']} 至 {inv['period_end']}")
+    lines.append(f"- 日报覆盖：{len(notes)} 篇 · {'、'.join(n['date'][-2:] for n in notes) or '无'}")
+    empty = [n['date'] for n in notes if n['entries'] == 0]
+    if empty:
+        lines.append(f"- 无结构化条目的日报：{'、'.join(empty)}")
+    lines.append(f"- 条目：{len(inv['entries'])} 条，纳入 {len(included)} 条，排除 {len(excluded)} 条")
+    lines.append(f"- 范围规则：{scope_desc or '无（全部纳入）'}")
+    lines.append('- 说明：AI 生成的今日总结块不计入；每条只带日报里的结构化字段，判断与归并留给复盘者')
+    if brief:
+        lines.append('- 精简版：每条只保留结果与工作项，归并工作线用；核对交付边界时回到完整版或原日报')
+    lines.append('')
+    lines.append('## 纳入条目（按日期）')
+    current = None
+    for e in included:
+        if e['date'] != current:
+            current = e['date']
+            lines += ['', f"### {current}"]
+        head = f"#### {e['title']}" + (f" — {e['time']}" if e['time'] else '')
+        lines += ['', head]
+        field_order = (('结果', 'conclusion'),) if brief else (('结果', 'conclusion'), ('问题', 'problem'), ('处理', 'solution'), ('要点', 'key_points'))
+        for label, key in field_order:
+            if e[key]:
+                lines.append(f"- {label}: {e[key]}")
+        if e['work_items']:
+            lines.append(f"- 工作项: {' · '.join(work_item_display(w) for w in e['work_items'])}")
+        if not brief and e['links']:
+            lines.append(f"- 文档: {' · '.join(e['links'])}")
+        if not brief and e['tags']:
+            lines.append(f"- 标签: {' '.join('#' + t.lstrip('#') for t in e['tags'])}")
+    lines += ['', '## 排除条目（只列标题，review 里要点名被排除的工作线）']
+    if excluded:
+        for e in excluded:
+            tags = ' '.join('#' + t.lstrip('#') for t in e['tags'][:3])
+            lines.append(f"- {e['date']} · {e['title']}" + (f" · {tags}" if tags else ''))
+    else:
+        lines.append('- 无')
+    prefix_dates: Dict[str, List[str]] = {}
+    for e in included:
+        for w in e['work_items']:
+            pre = work_item_prefix(w) or '其他'
+            prefix_dates.setdefault(pre, []).append(e['date'])
+    lines += ['', '## 工作项前缀索引（纳入部分）']
+    if prefix_dates:
+        for pre, dates in sorted(prefix_dates.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"- {pre}: {len(dates)} 处 · {'、'.join(uniq_keep_order(d[-2:] for d in dates))}")
+    else:
+        lines.append('- 无')
+    lines += ['', '## 日报来源链接']
+    lines.append(' · '.join(f"[[{n['path'][:-3]}]]" for n in notes) or '- 无')
+    return '\n'.join(lines) + '\n'
+
+
+def count_daily_notes_in_period(config: Dict[str, Any], start: dt.date, end: dt.date) -> int:
+    count = 0
+    day = start
+    while day <= end:
+        try:
+            read_note(config, daily_path(config, day))
+            count += 1
+        except Exception:
+            pass
+        day += dt.timedelta(days=1)
+    return count
+
+
+def monthly_note_checks(config: Dict[str, Any], meta: Dict[str, Any], body: str, text: str) -> Dict[str, Any]:
+    """Extra verification for type: monthly-goal-review notes. Reports; only the count is fixable."""
+    missing = [h for h in MONTHLY_REQUIRED_HEADINGS if not re.search(rf'^{re.escape(h)}\s*$', body, flags=re.M)]
+    result: Dict[str, Any] = {
+        'required_headings_ok': not missing,
+        'missing_headings': missing,
+        'no_summary_markers_ok': START not in text and END not in text,
+    }
+    try:
+        start = parse_date(str(meta.get('period_start')))
+        end = parse_date(str(meta.get('period_end')))
+    except Exception:
+        result['period_ok'] = False
+        return result
+    result['period_ok'] = True
+    actual = count_daily_notes_in_period(config, start, end)
+    result['actual_source_daily_notes'] = actual
+    result['source_daily_notes_ok'] = meta.get('source_daily_notes') == actual
+    late = sorted({m.group(0) for m in ISO_DATE_RE.finditer(body) if parse_date(m.group(0)) > end})
+    result['post_period_dates'] = late
+    return result
+
+
 def iter_weekly_modules(note_text: str) -> List[Dict[str, str]]:
     body = strip_frontmatter(note_text)
     region = find_generated_region(body)
@@ -1008,6 +1240,43 @@ views:
       - file.mtime
     groupBy:
       property: week_end
+      direction: DESC
+"""
+    if kind == 'monthly':
+        return """filters:
+  and:
+    - 'type == "monthly-goal-review"'
+    - 'file.ext == "md"'
+
+properties:
+  period_start:
+    displayName: "Period Start"
+  period_end:
+    displayName: "Period End"
+  project:
+    displayName: Project
+  status:
+    displayName: Status
+  source_daily_notes:
+    displayName: "Daily Notes Read"
+  word_count:
+    displayName: "Body Characters"
+
+views:
+  - type: table
+    name: "Monthly Reviews"
+    limit: 36
+    order:
+      - file.name
+      - project
+      - period_start
+      - period_end
+      - status
+      - source_daily_notes
+      - word_count
+      - file.mtime
+    groupBy:
+      property: period_start
       direction: DESC
 """
     raise ValueError(f"unknown base kind: {kind}")
@@ -1355,6 +1624,9 @@ def cmd_verify_note(args):
     config = load_config(args)
     text = read_note(config, args.path)
     meta, body = split_frontmatter(text)
+    # render_note trims trailing whitespace to one newline; count what will actually be
+    # written, or a note ending in two blank lines needs two --fix passes to settle.
+    body = body.rstrip() + '\n'
     actual = count_body_chars(body)
     stored_raw = meta.get('word_count')
     try:
@@ -1362,26 +1634,69 @@ def cmd_verify_note(args):
     except Exception:
         stored = None
     marker_ok = text.count(START) == text.count(END)
-    fixed = False
+    is_monthly = meta.get('type') == 'monthly-goal-review'
+    monthly = monthly_note_checks(config, meta, body, text) if is_monthly else {}
+    dirty = False
     if args.fix and (stored != actual or not stored_raw):
         meta['word_count'] = actual
-        create_or_overwrite_note(config, args.path, render_note(meta, body))
         stored = actual
-        fixed = True
+        dirty = True
+    if args.fix and is_monthly and monthly.get('period_ok') and not monthly.get('source_daily_notes_ok'):
+        meta['source_daily_notes'] = monthly['actual_source_daily_notes']
+        monthly['source_daily_notes_ok'] = True
+        dirty = True
+    if dirty:
+        if is_monthly:
+            # A reviewed monthly note keeps its authoring date; refreshes stamp `updated`.
+            meta['updated'] = dt.date.today().isoformat()
+        create_or_overwrite_note(config, args.path, render_note(meta, body))
     result = {
         'path': args.path,
         'word_count': stored,
         'actual_word_count': actual,
         'word_count_ok': stored == actual,
         'summary_markers_ok': marker_ok,
-        'fixed': fixed,
+        'fixed': dirty,
     }
+    result.update(monthly)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_inventory_month(args):
+    config = load_config(args)
+    year, month = parse_month(args.month)
+    inv = gather_month_entries(config, year, month)
+    tags = parse_work_items_arg(args.tags)
+    prefixes = parse_work_items_arg(args.work_item_prefixes)
+    keywords = parse_work_items_arg(args.keywords)
+    included, excluded = scope_month_entries(inv['entries'], tags, prefixes, keywords)
+    scope_bits = []
+    if tags:
+        scope_bits.append('标签 ' + '/'.join('#' + t.lstrip('#') for t in tags))
+    if prefixes:
+        scope_bits.append('工作项前缀 ' + '/'.join(p.upper() for p in prefixes))
+    if keywords:
+        scope_bits.append('标题关键词 ' + '/'.join(keywords))
+    scope_desc = '；'.join(scope_bits)
+    if args.format == 'json':
+        out = json.dumps({**inv, 'included': included, 'excluded': excluded, 'scope': scope_desc}, ensure_ascii=False, indent=2)
+    else:
+        out = build_month_ledger(inv, included, excluded, scope_desc, brief=args.brief)
+    if args.out:
+        target = Path(args.out).expanduser()
+        vault_root = resolve_vault_root(config)
+        if vault_root is not None and path_is_within(target.resolve(), vault_root.resolve()):
+            raise ValueError('the ledger is working material; write it outside the vault')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(out)
+        print(json.dumps({'out': str(target), 'notes': len(inv['notes']), 'entries': len(inv['entries']), 'included': len(included), 'excluded': len(excluded), 'suggested_note_path': monthly_path(config, year, month, args.project)}, ensure_ascii=False))
+    else:
+        sys.stdout.write(out)
 
 
 def cmd_ensure_index_base(args):
     config = load_config(args)
-    kinds = ['daily', 'weekly'] if args.kind == 'all' else [args.kind]
+    kinds = ['daily', 'weekly', 'monthly'] if args.kind == 'all' else [args.kind]
     written = []
     for kind in kinds:
         path = base_index_path(config, kind)
@@ -1398,12 +1713,13 @@ def add_common_args(p):
     p.add_argument('--vault-path')
     p.add_argument('--daily-dir')
     p.add_argument('--weekly-dir')
+    p.add_argument('--monthly-dir')
     p.add_argument('--index-dir')
     p.add_argument('--queue-db')
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Generate Obsidian daily and weekly review notes from existing markdown content.')
+    ap = argparse.ArgumentParser(description='Generate Obsidian daily, weekly and monthly review notes from existing markdown content.')
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     a = sub.add_parser('append-entry', help='Append a structured session entry into a daily note.')
@@ -1461,7 +1777,19 @@ def main():
     b.add_argument('--limit', type=int, default=4, help='Maximum number of top-level project groups to print.')
     b.set_defaults(func=cmd_print_weekly_brief)
 
-    v = sub.add_parser('verify-note', help='Verify a note word_count and generated summary markers.')
+    im = sub.add_parser('inventory-month', help='Read every daily note of one month once and print a private evidence ledger for a monthly review.')
+    add_common_args(im)
+    im.add_argument('--month', required=True, help='Reporting month as YYYY-MM.')
+    im.add_argument('--tags', default='', help='Comma-separated tags that put an entry in scope, e.g. kizuna,omnivibe.')
+    im.add_argument('--work-item-prefixes', default='', help='Comma-separated work-item domain prefixes that put an entry in scope, e.g. CC,PLT.')
+    im.add_argument('--keywords', default='', help='Comma-separated title keywords that put an entry in scope.')
+    im.add_argument('--project', default='', help='Project name used only to suggest the monthly note path.')
+    im.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    im.add_argument('--brief', action='store_true', help='Markdown only: keep title, 结果 and 工作项 per entry for a first grouping pass.')
+    im.add_argument('--out', default='', help='Write the ledger to this file outside the vault instead of stdout.')
+    im.set_defaults(func=cmd_inventory_month)
+
+    v = sub.add_parser('verify-note', help='Verify a note word_count and generated summary markers; monthly-goal-review notes also get heading, source-count and marker checks.')
     add_common_args(v)
     v.add_argument('--path', required=True)
     v.add_argument('--fix', action='store_true')
@@ -1469,7 +1797,7 @@ def main():
 
     ib = sub.add_parser('ensure-index-base', help='Create or refresh Obsidian Bases index files for daily and weekly notes.')
     add_common_args(ib)
-    ib.add_argument('--kind', choices=['daily', 'weekly', 'all'], default='all')
+    ib.add_argument('--kind', choices=['daily', 'weekly', 'monthly', 'all'], default='all')
     ib.set_defaults(func=cmd_ensure_index_base)
 
     args = ap.parse_args()

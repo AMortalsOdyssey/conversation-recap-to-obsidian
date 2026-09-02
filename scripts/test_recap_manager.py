@@ -60,6 +60,7 @@ def make_test_config(root: Path):
         'vault_path': str(vault),
         'daily_dir': 'daily',
         'weekly_dir': 'weekly',
+        'monthly_dir': 'monthly',
         'index_dir': 'index',
         'queue_db': str(root / 'state' / 'queue.db'),
     }
@@ -800,3 +801,200 @@ class EntryDateResolutionTests(unittest.TestCase):
 
         self.assertEqual(source, 'today')
         self.assertIn('does-not-exist', stderr.getvalue())
+
+
+class MonthlyReviewTests(unittest.TestCase):
+    """Mode 4 support: the script does the counting, the reviewer does the judging."""
+
+    def write_daily(self, root: Path, date: str, body: str) -> None:
+        note = root / 'vault' / 'daily' / date[:4] / date[5:7] / f'{date}.md'
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(f'---\ndate: {date}\ntype: daily\n---\n# {date}\n\n{body}')
+
+    def seed_month(self, root: Path) -> None:
+        self.write_daily(root, '2026-01-03', (
+            '#### Nova 结算恢复状态首批实现 — 10:05\n\n'
+            '- **结果**: 后端幂等恢复已实现，自动化测试通过并部署测试环境；尚未真机验收。\n'
+            '- **问题**: 支付中途切后台会停在处理中。\n'
+            '- **处理**: 增加服务端恢复 outcome 和前端重进对账。\n'
+            '- **要点**: 测试部署不能替代真实支付验收。\n'
+            '- **工作项**: `NV-PAY-26103-1`\n'
+            '- **标签**: #nova #支付\n\n'
+            '#### Atlas 搜索索引升级 — 11:00\n\n'
+            '- **结果**: Atlas 索引迁移完成。\n'
+            '- **处理**: 重建索引并切流。\n'
+            '- **标签**: #atlas\n\n'
+            f'{recap_manager.START}\n## 今日总结\n\n#### 假条目 不该进台账\n\n- **结果**: 生成块里的内容。\n{recap_manager.END}\n'
+        ))
+        self.write_daily(root, '2026-01-15', (
+            '#### Nova 支付中断恢复真机验收 — 18:20\n\n'
+            '- **结果**: 双端各完成一次切后台恢复验收；release MR 已创建未合并。\n'
+            '- **要点**: 真机 Case 通过不等于 release 已交付。\n'
+            '- **工作项**: `NV-PAY-26103-1` · `NV-WEB-26115-2`\n'
+        ))
+        self.write_daily(root, '2026-01-29', '随手记一句，没有结构化条目。\n')
+
+    def test_monthly_path_follows_monthly_dir_and_project(self):
+        config = {**recap_manager.DEFAULTS, 'monthly_dir': 'Memory/月度目标复盘'}
+        self.assertEqual(
+            recap_manager.monthly_path(config, 2026, 8, 'Kizuna'),
+            'Memory/月度目标复盘/2026/08/2026-08_Kizuna个人目标月度Review.md',
+        )
+        self.assertEqual(recap_manager.month_bounds(2026, 12), (dt.date(2026, 12, 1), dt.date(2026, 12, 31)))
+        with self.assertRaises(ValueError):
+            recap_manager.parse_month('2026/08')
+
+    def test_inventory_counts_every_note_and_keeps_excluded_work_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            self.seed_month(root)
+            inv = recap_manager.gather_month_entries(config, 2026, 1)
+            self.assertEqual([n['date'] for n in inv['notes']], ['2026-01-03', '2026-01-15', '2026-01-29'])
+            titles = [e['title'] for e in inv['entries']]
+            self.assertEqual(len(titles), 3)
+            self.assertNotIn('假条目 不该进台账', titles, 'generated 今日总结 block must not feed the ledger')
+            self.assertEqual(inv['entries'][0]['time'], '10:05')
+
+            by_prefix_tag, _ = recap_manager.scope_month_entries(inv['entries'], ['支'], [], [])
+            self.assertEqual([e['title'] for e in by_prefix_tag], ['Nova 结算恢复状态首批实现'], '#支付 must match the wanted tag 支 by prefix')
+
+            included, excluded = recap_manager.scope_month_entries(inv['entries'], ['nova'], ['NV'], [])
+            self.assertEqual([e['title'] for e in included], ['Nova 结算恢复状态首批实现', 'Nova 支付中断恢复真机验收'])
+            self.assertEqual([e['title'] for e in excluded], ['Atlas 搜索索引升级'])
+            # the second Nova entry has no tag line; the work-item prefix alone must pull it in
+            self.assertEqual(included[1]['work_items'], ['NV-PAY-26103-1', 'NV-WEB-26115-2'])
+
+            ledger = recap_manager.build_month_ledger(inv, included, excluded, '标签 #nova；工作项前缀 NV')
+            self.assertIn('日报覆盖：3 篇', ledger)
+            self.assertIn('无结构化条目的日报：2026-01-29', ledger)
+            self.assertIn('纳入 2 条，排除 1 条', ledger)
+            self.assertIn('- 2026-01-03 · Atlas 搜索索引升级 · #atlas', ledger)
+            self.assertIn('- NV: 3 处', ledger)
+            self.assertIn('[[daily/2026/01/2026-01-03]]', ledger)
+
+            brief = recap_manager.build_month_ledger(inv, included, excluded, '', brief=True)
+            self.assertIn('- 结果: 后端幂等恢复已实现', brief)
+            self.assertNotIn('- 处理:', brief)
+            self.assertIn('精简版', brief)
+
+            everything, nothing = recap_manager.scope_month_entries(inv['entries'], [], [], [])
+            self.assertEqual((len(everything), nothing), (3, []))
+
+    def test_inventory_month_command_refuses_to_write_ledger_into_vault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            self.seed_month(root)
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+
+            class Args:
+                config = str(config_path)
+                obsidian_bin = vault = vault_path = daily_dir = weekly_dir = monthly_dir = index_dir = queue_db = None
+                month = '2026-01'
+                tags = 'nova'
+                work_item_prefixes = 'NV'
+                keywords = ''
+                project = 'Nova'
+                format = 'markdown'
+                brief = False
+                out = str(root / 'vault' / 'ledger.md')
+
+            with self.assertRaises(ValueError):
+                recap_manager.cmd_inventory_month(Args)
+
+            Args.out = str(root / 'work' / 'ledger.md')
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                recap_manager.cmd_inventory_month(Args)
+            summary = json.loads(buf.getvalue())
+            self.assertEqual((summary['notes'], summary['entries'], summary['included'], summary['excluded']), (3, 3, 2, 1))
+            self.assertEqual(summary['suggested_note_path'], 'monthly/2026/01/2026-01_Nova个人目标月度Review.md')
+            self.assertTrue((root / 'work' / 'ledger.md').exists())
+
+    def test_verify_note_checks_monthly_headings_count_and_flags_post_period_dates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_test_config(root)
+            self.seed_month(root)
+            note = root / 'vault' / 'monthly' / '2026' / '01' / '2026-01_Nova个人目标月度Review.md'
+            note.parent.mkdir(parents=True)
+            note.write_text(
+                '---\ntitle: "2026-01 Nova"\ndate: 2026-02-02\ntype: monthly-goal-review\n'
+                'period_start: 2026-01-01\nperiod_end: 2026-01-31\nsource_daily_notes: 9\nword_count: 1\n---\n'
+                '# 2026-01 Nova\n\n## 本月目标\n\n目标。\n\n## 本月目标完成情况\n\n阶段性达成。\n\n## 解决效果\n\n效果。\n\n'
+                '## 下月重点动作\n\n- 月后补充（2026-02-11 复测）：结算 120 秒。\n'
+            )
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+
+            class Args:
+                config = str(config_path)
+                obsidian_bin = vault = vault_path = daily_dir = weekly_dir = monthly_dir = index_dir = queue_db = None
+                path = 'monthly/2026/01/2026-01_Nova个人目标月度Review.md'
+                fix = True
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                recap_manager.cmd_verify_note(Args)
+            result = json.loads(buf.getvalue())
+            self.assertFalse(result['required_headings_ok'])
+            self.assertEqual(result['missing_headings'], ['## 需要协同支持的事项'])
+            self.assertTrue(result['no_summary_markers_ok'])
+            self.assertEqual(result['actual_source_daily_notes'], 3)
+            self.assertTrue(result['source_daily_notes_ok'], 'fix must correct the count to what is actually on disk')
+            self.assertEqual(result['post_period_dates'], ['2026-02-11'])
+            self.assertTrue(result['fixed'])
+
+            meta, body = recap_manager.split_frontmatter(note.read_text())
+            self.assertEqual(meta['source_daily_notes'], 3)
+            self.assertEqual(meta['word_count'], len(body))
+            self.assertEqual(meta['date'], '2026-02-02', 'authoring date must survive a refresh')
+            self.assertEqual(meta['updated'], dt.date.today().isoformat())
+
+    def test_work_item_prefix_sees_through_wikilinks_and_backticks(self):
+        self.assertEqual(recap_manager.work_item_prefix('[[kizuna/方案#^cc-bklt-26810-1|CC-BKLT-26810-1]]'), 'CC')
+        self.assertEqual(recap_manager.work_item_display('[[kizuna/方案#^cc-bklt-26810-1|CC-BKLT-26810-1]]'), 'CC-BKLT-26810-1')
+        self.assertEqual(recap_manager.work_item_prefix('`PLT-DPLY-26825-1`'), 'PLT')
+        self.assertEqual(recap_manager.work_item_prefix('随便一句'), '')
+
+    def test_block_list_frontmatter_survives_a_rewrite(self):
+        text = '---\ntitle: "T"\ntype: monthly-goal-review\nword_count: 1\ntags:\n  - Kizuna\n  - 月度复盘\n---\n正文\n'
+        meta, body = recap_manager.split_frontmatter(text)
+        self.assertEqual(meta['tags'], ['Kizuna', '月度复盘'])
+        rendered = recap_manager.render_note(meta, body)
+        self.assertIn('tags: [Kizuna, 月度复盘]', rendered)
+        again, _ = recap_manager.split_frontmatter(rendered)
+        self.assertEqual(again['tags'], ['Kizuna', '月度复盘'])
+
+    def test_verify_fix_settles_in_one_pass_even_with_trailing_blank_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note = root / 'Memory' / 'daily' / '2026' / '06' / '2026-06-24.md'
+            note.parent.mkdir(parents=True)
+            note.write_text('---\nword_count: 1\n---\n# 2026-06-24\n\n正文\n\n\n')
+
+            class Args:
+                config = None
+                obsidian_bin = '/missing/obsidian'
+                vault = 'TestVault'
+                vault_path = str(root)
+                daily_dir = weekly_dir = monthly_dir = index_dir = None
+                path = 'Memory/daily/2026/06/2026-06-24.md'
+                fix = True
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                recap_manager.cmd_verify_note(Args)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                recap_manager.cmd_verify_note(Args)
+            second = json.loads(buf.getvalue())
+            self.assertFalse(second['fixed'])
+            self.assertTrue(second['word_count_ok'])
+
+    def test_monthly_base_index_exists(self):
+        content = recap_manager.build_base_index_content('monthly')
+        self.assertIn('type == "monthly-goal-review"', content)
+        self.assertEqual(recap_manager.base_index_path({'index_dir': 'index'}, 'monthly'), 'index/Monthly Reviews.base')
+

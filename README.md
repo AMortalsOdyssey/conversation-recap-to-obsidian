@@ -72,6 +72,8 @@ conversation-recap-to-obsidian/
 ├── README.md
 ├── config.example.json
 ├── .gitignore
+├── references/
+│   └── monthly-goal-review.md
 └── scripts/
     ├── recap_manager.py
     └── test_recap_manager.py
@@ -87,6 +89,7 @@ Copy `config.example.json` to `config.json` and edit it for your own environment
   "vault_path": "/absolute/path/to/your/vault",
   "daily_dir": "daily",
   "weekly_dir": "weekly",
+  "monthly_dir": "monthly",
   "index_dir": "index",
   "queue_db": "",
   "obsidian_bin": "obsidian"
@@ -166,6 +169,8 @@ python scripts/recap_manager.py verify-note \
   --fix
 ```
 
+For a note with `type: monthly-goal-review` the same command also checks the five review headings, recounts `source_daily_notes` from the Daily Notes actually present in the period (corrected by `--fix`), rejects `AI_SUMMARY` markers, and lists every date later than `period_end` so post-period evidence can be labelled.
+
 ### 8) Print a group-sendable weekly brief
 
 The brief groups repeated modules under the same project prefix so one project does not occupy several top-level numbered items. Treat the command output as a draft and merge its subitems into short categories such as fixes, optimizations, verification, or releases when needed.
@@ -181,7 +186,19 @@ python scripts/recap_manager.py print-weekly-brief \
 python scripts/recap_manager.py ensure-index-base --kind all
 ```
 
-This writes `Daily Notes.base` and `Weekly Reports.base` under `index_dir`.
+This writes `Daily Notes.base`, `Weekly Reports.base` and `Monthly Reviews.base` under `index_dir`.
+
+### 10) Inventory a month for a monthly goal review
+
+```bash
+python scripts/recap_manager.py inventory-month \
+  --month 2026-08 \
+  --tags kizuna,创角 --work-item-prefixes CC,PLT --keywords comfyproxy \
+  --project Kizuna \
+  --brief --out ~/work/ledger-2026-08-brief.md
+```
+
+The command reads every Daily Note of the month once, drops the generated summary blocks, and writes a private evidence ledger: coverage count and dates, every in-scope entry with its structured fields, the excluded entries by title, a work-item prefix index, and the source links. Scope rules are OR-ed and a tag matches by prefix. `--brief` keeps only title, 结果 and 工作项 for a first grouping pass; `--format json` returns the raw structure. The ledger is working material, so `--out` refuses paths inside the vault. The review itself is written by the reviewer following `references/monthly-goal-review.md`; the script only counts and verifies.
 
 ## Publishing guidance
 
